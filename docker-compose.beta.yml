@@ -54,6 +54,13 @@ services:
     networks:
       spoonet:
         ipv4_address: 172.30.0.200
+        # The public link surfaces tenant-scope by Host header, so the
+        # frontend's server-side fetches must arrive AS beta.spoo.me —
+        # docker DNS makes the URL's host produce the right Host header
+        # (the backend strips the :8000). Nothing else on spoonet dials
+        # this name; Caddy uses container names.
+        aliases:
+          - beta.spoo.me
     logging:
       driver: json-file
       options:
@@ -148,13 +155,16 @@ services:
   # Next frontend slice — Caddy's beta @next matcher routes page paths
   # here; everything else (auth, api, short codes) still hits app-beta
   # directly. SPOO_API_URL points the container's SSR fetches and dormant
-  # rewrites at the beta backend over docker DNS (never out via CF).
+  # rewrites at the beta backend over docker DNS (never out via CF) —
+  # via the beta.spoo.me network alias, NOT the container name: the
+  # public link surfaces tenant-scope by Host, and undici won't let a
+  # fetch override Host, so the URL's host has to be the tenant.
   next-beta:
     image: ghcr.io/spoo-me/frontend:${NEXT_IMAGE_TAG:-edge}
     container_name: spoo_next_beta
     restart: always
     environment:
-      - SPOO_API_URL=http://spoo_app_beta:8000
+      - SPOO_API_URL=http://beta.spoo.me:8000
     depends_on:
       app-beta:
         condition: service_healthy
