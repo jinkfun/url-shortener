@@ -96,7 +96,13 @@ beta.spoo.me {
 		path /privacy /terms /legal
 		path /relay/*
 		path /dashboard /dashboard/*
-		path /_next/* /favicon.ico /icon.png
+		path /_next/* /icon.png
+		path /favicon.ico /favicon.png /favicon.svg
+		# Next public/ asset dirs + the favicon-proxy route. A new top-level
+		# dir under public/ needs a line here AND a reserved-aliases entry,
+		# or it 404s through FastAPI and takes client pages down with it.
+		path /geo/* /brand/* /icons-3d/*
+		path /api/favicon
 	}
 	reverse_proxy @next spoo_next_beta:3000 {
 		header_up X-Real-IP {client_ip}
