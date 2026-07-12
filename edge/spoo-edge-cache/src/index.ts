@@ -30,7 +30,82 @@ const EXCLUDED_PREFIXES = [
   "/oauth/",
   "/static/",
   "/stats/",
+  "/relay/",
+  "/onboarding/",
 ];
+
+/**
+ * Single-segment page paths that are never short codes — the reserved
+ * alias list (shared/reserved_aliases.py) guarantees no code can take
+ * these names, so skipping KV is free. Exact matches only: "aboutus"
+ * is a legal alias and keeps its lookup. Drift from the Python list is
+ * benign — a missing entry costs one wasted KV read, nothing more.
+ */
+const EXCLUDED_EXACT = new Set([
+  "about",
+  "api",
+  "apps",
+  "auth",
+  "billing",
+  "blog",
+  "brand",
+  "callback",
+  "changelog",
+  "contact",
+  "dashboard",
+  "discord",
+  "docs",
+  "domains",
+  "emoji",
+  "error",
+  "export",
+  "favicon",
+  "features",
+  "forgot-password",
+  "geo",
+  "github",
+  "health",
+  "help",
+  "home",
+  "humans",
+  "icon",
+  "icons-3d",
+  "images",
+  "keys",
+  "legal",
+  "links",
+  "login",
+  "logout",
+  "metric",
+  "oauth",
+  "onboarding",
+  "pricing",
+  "privacy",
+  "privacy-policy",
+  "profile",
+  "profile-pictures",
+  "public",
+  "register",
+  "relay",
+  "report",
+  "reset",
+  "result",
+  "robots",
+  "security",
+  "settings",
+  "signin",
+  "signup",
+  "sitemap",
+  "statistics",
+  "stats",
+  "static",
+  "terms",
+  "terms-of-service",
+  "testimonials",
+  "tos",
+  "twitter",
+  "verify",
+]);
 
 /**
  * KV key for this request, or null when the request can never be a
@@ -53,6 +128,9 @@ export function lookupKey(request: Request): string | null {
 
   const code = path.slice(1);
   if (code.length === 0 || code.includes("/")) return null;
+  // /{code}+ is preview intent — + is never a legal alias character.
+  if (code.endsWith("+") || code.endsWith("%2B")) return null;
+  if (EXCLUDED_EXACT.has(code)) return null;
 
   // Promotion writes keys with the canonical host: lowercase, no www.
   const host = url.hostname.toLowerCase().replace(/^www\./, "");
