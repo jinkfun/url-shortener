@@ -64,11 +64,12 @@ from schemas.models.url import (
     UrlStatus,
     UrlV2Doc,
 )
+from shared.alias_dispatch import resolution_order
 from shared.datetime_utils import parse_datetime
 from shared.generators import generate_short_code_v2
+from shared.reserved_aliases import is_reserved_alias
 from shared.url_utils import extract_hostname
 from shared.validators import (
-    is_emoji_alias,
     validate_alias,
     validate_blocked_url,
     validate_emoji_alias,
@@ -77,7 +78,7 @@ from shared.validators import (
 
 log = get_logger(__name__)
 
-AliasCheckResult = Literal["available", "length", "format", "taken"]
+AliasCheckResult = Literal["available", "length", "format", "reserved", "taken"]
 
 
 def _validate_geo_rules(
@@ -161,6 +162,11 @@ async def _handle_alias(
             if "domain" in request.model_fields_set
             else existing.domain
         )
+        # Same reserved check as create — an edit must not be a side door
+        # for aliases that would be rejected at creation.
+        if scope == service._system_default_domain and is_reserved_alias(request.alias):
+            log.info("url_alias_reserved", short_code=request.alias, domain=scope)
+            raise ValidationError("Alias is reserved", field="alias")
         if not await service.check_alias_available(request.alias, domain=scope):
             log.info(
                 "url_alias_conflict",
@@ -185,6 +191,20 @@ async def _handle_domain(
     target = request.domain or service._system_default_domain
     if target == existing.domain:
         return
+    # A domain-only move must not smuggle a reserved alias onto the default
+    # domain — reserved names are legal on custom domains, so the alias may
+    # be arriving from a namespace where it was fine. When alias is also
+    # changing, _handle_alias already vetted the new one against `target`.
+    effective_alias = ops.get("alias", existing.alias)
+    if target == service._system_default_domain and is_reserved_alias(effective_alias):
+        log.info(
+            "url_domain_move_alias_reserved",
+            short_code=effective_alias,
+            from_domain=existing.domain,
+        )
+        raise ValidationError(
+            f"Alias '{effective_alias}' is reserved on {target}", field="domain"
+        )
     # If alias isn't also changing, verify the existing alias is free on the
     # target tenant. The alias handler already ran (it's listed first in
     # FIELD_HANDLERS) and validated its own collision against `target`, so we
@@ -508,14 +528,18 @@ class UrlService:
         """Evaluate a candidate alias against the full creation rules.
 
         Mirrors what POST /api/v1/shorten would enforce (length, charset,
-        collision) so the UI can surface precise feedback without duplicating
-        the rules. Returns a single literal describing the first failing check,
-        or ``"available"`` when the alias would be accepted today.
+        reserved words, collision) so the UI can surface precise feedback
+        without duplicating the rules. Returns a single literal describing
+        the first failing check, or ``"available"`` when the alias would be
+        accepted today.
         """
         if not (3 <= len(alias) <= 16):
             return "length"
         if not validate_alias(alias):
             return "format"
+        target_domain = domain or self._system_default_domain
+        if target_domain == self._system_default_domain and is_reserved_alias(alias):
+            return "reserved"
         if not await self.check_alias_available(alias, domain=domain):
             return "taken"
         return "available"
@@ -662,6 +686,13 @@ class UrlService:
                 raise ValidationError(
                     "Alias contains invalid characters", field="alias"
                 )
+            # Reserved words only shadow paths on the default domain —
+            # custom-domain namespaces carry no frontend routes.
+            if target_domain == self._system_default_domain and is_reserved_alias(
+                request.alias
+            ):
+                log.info("url_alias_reserved", short_code=request.alias)
+                raise ValidationError("Alias is reserved", field="alias")
             if not await self.check_alias_available(
                 request.alias, domain=target_domain
             ):
@@ -1080,13 +1111,13 @@ class UrlService:
         """
         Determine URL schema and fetch from the appropriate collection.
 
-        Mirrors get_url_by_length_and_type() exactly:
-          emoji → emojis, schema "emoji"
-          7 chars → urlsV2 first, urls fallback
-          6 chars → urls first, urlsV2 fallback
-          other   → urlsV2 first, urls fallback
+        The lookup order comes from ``shared.alias_dispatch.resolution_order``
+        — the single source of truth shared with the public preview endpoint,
+        so every resolving surface answers a given code from the same
+        generation. Only the per-generation lookup/conversion lives here.
         """
-        if is_emoji_alias(short_code):
+        order = resolution_order(short_code)
+        if order[0] == SchemaVersion.EMOJI:
             doc = await self._emoji_repo.find_by_id(short_code)
             if doc is not None:
                 return (
@@ -1094,14 +1125,9 @@ class UrlService:
                     SchemaVersion.EMOJI,
                 )
             return None, SchemaVersion.EMOJI
-
-        code_len = len(short_code)
-        if code_len == 7:
-            return await self._try_v2_then_v1(short_code)
-        elif code_len == 6:
+        if order[0] == SchemaVersion.V1:
             return await self._try_v1_then_v2(short_code)
-        else:
-            return await self._try_v2_then_v1(short_code)
+        return await self._try_v2_then_v1(short_code)
 
     async def _dispatch_custom_domain(
         self, short_code: str, domain: str
