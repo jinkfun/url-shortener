@@ -67,6 +67,36 @@
 	}
 }
 
+# Compose one branded error page (beta): when the origin self-describes
+# an error (X-Error-Code) and the client meaningfully asked for HTML,
+# swap the body for the Next error page while KEEPING the origin status
+# (the inner proxy would otherwise answer with Next's 200). JSON clients
+# and Accept:*/* scanner probes get the origin response untouched —
+# composition costs a Next render. args[0] = the status code.
+(compose_beta_err) {
+	@err{args[0]} {
+		status {args[0]}
+		header X-Error-Code *
+	}
+	handle_response @err{args[0]} {
+		@html{args[0]} {
+			header Accept *text/html*
+			method GET HEAD
+		}
+		handle @html{args[0]} {
+			rewrite * /_error/{args[0]}?code={rp.header.X-Error-Code}&from={uri}
+			reverse_proxy spoo_next_beta:3000 {
+				@ok{args[0]} status 2xx
+				replace_status @ok{args[0]} {args[0]}
+				header_up Host {host}
+			}
+		}
+		handle {
+			copy_response
+		}
+	}
+}
+
 spoo.me, www.spoo.me {
 	import common_tls
 	reverse_proxy app:8000 {
@@ -128,29 +158,11 @@ beta.spoo.me {
 		header_up X-Real-IP {client_ip}
 		header_up X-Forwarded-For {client_ip}
 
-		# Compose branded error pages ONLY when the origin self-describes
-		# the error (X-Error-Code) AND the client meaningfully asked for
-		# HTML. JSON clients and Accept:*/* scanner probes get the origin
-		# response untouched — composition costs a Next render.
-		@err {
-			status 404 410 429 451 500
-			header X-Error-Code *
-		}
-		handle_response @err {
-			@html {
-				header Accept *text/html*
-				method GET HEAD
-			}
-			handle @html {
-				rewrite * /_error/{rp.status_code}?code={rp.header.X-Error-Code}&from={uri}
-				reverse_proxy spoo_next_beta:3000 {
-					header_up Host {host}
-				}
-			}
-			handle {
-				copy_response
-			}
-		}
+		import compose_beta_err 404
+		import compose_beta_err 410
+		import compose_beta_err 429
+		import compose_beta_err 451
+		import compose_beta_err 500
 	}
 }
 
