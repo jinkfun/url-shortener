@@ -80,6 +80,31 @@ spoo.me, www.spoo.me {
 # container name, not compose service name.
 beta.spoo.me {
 	import common_tls
+
+	# Only paths with a built Next page belong here — a listed path
+	# with no page behind it 404s in Next instead of falling through
+	# to FastAPI.
+	@next {
+		path /
+		path /about /about/*
+		path /pricing /pricing/*
+		path /apps /apps/*
+		path /testimonials /testimonials/*
+		path /contact
+		path /login /signup /forgot-password
+		path /onboarding /onboarding/*
+		path /privacy /terms /legal
+		path /relay/*
+		path /dashboard /dashboard/*
+		path /_next/* /favicon.ico /icon.png
+	}
+	reverse_proxy @next spoo_next_beta:3000 {
+		header_up X-Real-IP {client_ip}
+		header_up X-Forwarded-For {client_ip}
+		header_up Host {host}
+	}
+
+	# Everything else: short codes, /auth/*, /oauth/*, /api/v1/*, /static/*
 	reverse_proxy spoo_app_beta:8000 {
 		header_up X-Real-IP {client_ip}
 		header_up X-Forwarded-For {client_ip}

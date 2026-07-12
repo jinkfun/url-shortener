@@ -145,6 +145,37 @@ services:
         max-file: "2"
         tag: "{{.Name}}"
 
+  # Next frontend slice — Caddy's beta @next matcher routes page paths
+  # here; everything else (auth, api, short codes) still hits app-beta
+  # directly. SPOO_API_URL points the container's SSR fetches and dormant
+  # rewrites at the beta backend over docker DNS (never out via CF).
+  next-beta:
+    image: ghcr.io/spoo-me/frontend:${NEXT_IMAGE_TAG:-edge}
+    container_name: spoo_next_beta
+    restart: always
+    environment:
+      - SPOO_API_URL=http://spoo_app_beta:8000
+    depends_on:
+      app-beta:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "--tries=1", "--timeout=3", "http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    mem_limit: 512m
+    mem_reservation: 128m
+    networks:
+      spoonet:
+        ipv4_address: 172.30.0.204
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+        tag: "{{.Name}}"
+
 networks:
   spoonet:
     external: true
