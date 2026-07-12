@@ -144,9 +144,10 @@ beta.spoo.me {
 		header_up Host {host}
 	}
 
-	# /{code}+ preview. ASCII on purpose: percent-encoded emoji previews
-	# fall through to the FastAPI page (accepted split).
-	@preview path_regexp ^/[A-Za-z0-9_-]+\+$
+	# /{code}+ preview — any single segment ending in + (matched against
+	# the DECODED path, so emoji aliases land here too). No valid alias
+	# contains +, so this can never shadow a real code.
+	@preview path_regexp ^/[^/]+\+$
 	reverse_proxy @preview spoo_next_beta:3000 {
 		header_up X-Real-IP {client_ip}
 		header_up X-Forwarded-For {client_ip}
