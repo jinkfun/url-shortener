@@ -96,6 +96,10 @@ beta.spoo.me {
 		path /privacy /terms /legal
 		path /relay/*
 		path /dashboard /dashboard/*
+		# Subpaths ONLY — bare /stats is a legacy backend endpoint.
+		path /stats/*
+		# Composed-error URL (Next rewrites it to error-pages/ internally).
+		path /_error/*
 		path /_next/* /icon.png
 		path /favicon.ico /favicon.png /favicon.svg
 		# Next public/ asset dirs + the favicon-proxy route. A new top-level
@@ -110,10 +114,43 @@ beta.spoo.me {
 		header_up Host {host}
 	}
 
+	# /{code}+ preview. ASCII on purpose: percent-encoded emoji previews
+	# fall through to the FastAPI page (accepted split).
+	@preview path_regexp ^/[A-Za-z0-9_-]+\+$
+	reverse_proxy @preview spoo_next_beta:3000 {
+		header_up X-Real-IP {client_ip}
+		header_up X-Forwarded-For {client_ip}
+		header_up Host {host}
+	}
+
 	# Everything else: short codes, /auth/*, /oauth/*, /api/v1/*, /static/*
 	reverse_proxy spoo_app_beta:8000 {
 		header_up X-Real-IP {client_ip}
 		header_up X-Forwarded-For {client_ip}
+
+		# Compose branded error pages ONLY when the origin self-describes
+		# the error (X-Error-Code) AND the client meaningfully asked for
+		# HTML. JSON clients and Accept:*/* scanner probes get the origin
+		# response untouched — composition costs a Next render.
+		@err {
+			status 404 410 429 451 500
+			header X-Error-Code *
+		}
+		handle_response @err {
+			@html {
+				header Accept *text/html*
+				method GET HEAD
+			}
+			handle @html {
+				rewrite * /_error/{rp.status_code}?code={rp.header.X-Error-Code}&from={uri}
+				reverse_proxy spoo_next_beta:3000 {
+					header_up Host {host}
+				}
+			}
+			handle {
+				copy_response
+			}
+		}
 	}
 }
 
