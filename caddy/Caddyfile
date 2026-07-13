@@ -121,16 +121,6 @@ beta.spoo.me {
 Disallow: /" 200
 	}
 
-	# Backend API paths living under /dashboard/* must be carved out
-	# BEFORE the @next matcher: Next's same-origin rewrite for them
-	# bakes SPOO_API_URL at build time (the image bakes https://spoo.me),
-	# so letting Next proxy these sends beta traffic to prod.
-	@profile_api path /dashboard/profile-pictures /dashboard/profile-pictures/*
-	reverse_proxy @profile_api spoo_app_beta:8000 {
-		header_up X-Real-IP {client_ip}
-		header_up X-Forwarded-For {client_ip}
-	}
-
 	# Only paths with a built Next page belong here — a listed path
 	# with no page behind it 404s in Next instead of falling through
 	# to FastAPI.
