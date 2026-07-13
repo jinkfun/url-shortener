@@ -135,12 +135,10 @@ Disallow: /" 200
 	# with no page behind it 404s in Next instead of falling through
 	# to FastAPI.
 	@next {
-		path /
 		path /about /about/*
 		path /pricing /pricing/*
 		path /apps /apps/*
 		path /testimonials /testimonials/*
-		path /contact /report
 		path /login /signup /forgot-password
 		path /onboarding /onboarding/*
 		path /privacy /terms /legal
@@ -167,15 +165,18 @@ Disallow: /" 200
 		header_up Host {host}
 	}
 
-	# Stats pages are GET-only in Next: POST /stats/{code} is the legacy
-	# public JSON API and POST /stats the legacy form handler — both keep
-	# falling through to FastAPI forever. (An unscoped /stats/* matcher
-	# served API consumers 200+HTML — caught on beta.)
-	@next_stats {
+	# Paths whose GET is a Next page but whose POST is a shipped backend
+	# contract: / (the original anonymous shorten API), /contact and
+	# /report (legacy form intakes), /stats (legacy lookup form) and
+	# /stats/{code} (the legacy public JSON API). Next serves pages to
+	# POSTs with a 200, so an unscoped matcher silently breaks every one
+	# of these for API clients — caught twice on beta.
+	@next_get {
 		method GET HEAD
+		path / /contact /report
 		path /stats /stats/*
 	}
-	reverse_proxy @next_stats spoo_next_beta:3000 {
+	reverse_proxy @next_get spoo_next_beta:3000 {
 		header_up X-Real-IP {client_ip}
 		header_up X-Forwarded-For {client_ip}
 		header_up Host {host}
