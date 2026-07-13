@@ -120,7 +120,7 @@ beta.spoo.me {
 		path /pricing /pricing/*
 		path /apps /apps/*
 		path /testimonials /testimonials/*
-		path /contact
+		path /contact /report
 		path /login /signup /forgot-password
 		path /onboarding /onboarding/*
 		path /privacy /terms /legal
