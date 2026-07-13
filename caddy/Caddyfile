@@ -111,6 +111,16 @@ spoo.me, www.spoo.me {
 beta.spoo.me {
 	import common_tls
 
+	# BETA-ONLY (do not port to prod): beta is a duplicate of the whole
+	# site — never let crawlers index it. Wins over the matchers below
+	# because handle is ordered before reverse_proxy.
+	@robots path /robots.txt
+	handle @robots {
+		header Content-Type "text/plain; charset=utf-8"
+		respond "User-agent: *
+Disallow: /" 200
+	}
+
 	# Only paths with a built Next page belong here — a listed path
 	# with no page behind it 404s in Next instead of falling through
 	# to FastAPI.
@@ -137,6 +147,11 @@ beta.spoo.me {
 		# or it 404s through FastAPI and takes client pages down with it.
 		path /geo/* /brand/* /icons-3d/*
 		path /api/favicon
+		# SEO files (robots.ts/sitemap.ts generators + public/ text files).
+		# Exact .well-known path only — the rest of that namespace stays
+		# with the backend for whatever claims it later.
+		path /robots.txt /sitemap.xml /humans.txt
+		path /security.txt /.well-known/security.txt
 	}
 	reverse_proxy @next spoo_next_beta:3000 {
 		header_up X-Real-IP {client_ip}
