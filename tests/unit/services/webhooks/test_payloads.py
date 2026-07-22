@@ -99,7 +99,7 @@ class TestLinkClicked:
 class TestEventChanges:
     def test_meta_tags_change_strips_internal_fields(self):
         from schemas.models.url import LinkMetaTags
-        from services.url_service import _event_changes
+        from services.webhooks.payloads import event_changes
 
         existing = _doc()
         update_ops = {
@@ -116,7 +116,7 @@ class TestEventChanges:
             "expire_after": datetime(2026, 8, 1, tzinfo=timezone.utc),
             "updated_at": datetime.now(timezone.utc),
         }
-        changes = _event_changes(existing, update_ops)
+        changes = event_changes(existing, update_ops)
 
         assert "updated_at" not in changes
         assert changes["meta_tags"]["new"] == {
@@ -133,6 +133,6 @@ class TestEventChanges:
         existing_with_meta = existing.model_copy(
             update={"meta_tags": LinkMetaTags(title="Old", updated_ip="198.51.100.7")}
         )
-        changes2 = _event_changes(existing_with_meta, update_ops)
+        changes2 = event_changes(existing_with_meta, update_ops)
         assert changes2["meta_tags"]["old"]["title"] == "Old"
         assert "198.51.100.7" not in str(changes2)

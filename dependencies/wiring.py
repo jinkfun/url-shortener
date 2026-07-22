@@ -309,6 +309,7 @@ def wire_services(app: FastAPI, settings: AppSettings, redis_client) -> None:
         kv=edge_kv_client,
         system_default_domain=settings.system_default_domain,
         og_ttl_seconds=edge.og_ttl_seconds,
+        events=app.state.domain_event_sink,
     )
     app.state.stats_service = StatsService(
         click_repo,

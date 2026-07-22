@@ -55,7 +55,12 @@ from services.events.protocol import DomainEventSink
 from services.events.sinks import NullDomainEventSink
 from services.meta_tags.events import MetaImageValidateEvent
 from services.meta_tags.images import ingest_meta_image
-from services.webhooks.payloads import build_link_expired, link_owner_id, link_snapshot
+from services.webhooks.payloads import (
+    build_link_expired,
+    event_changes,
+    link_owner_id,
+    link_snapshot,
+)
 
 if TYPE_CHECKING:
     from infrastructure.cloudflare_kv import CloudflareKVClient
@@ -1043,18 +1048,8 @@ class UrlService:
         await self._emit_link_event(
             "link.updated",
             merged_doc,
-            extra={"changes": _event_changes(existing, update_ops)},
+            extra={"changes": event_changes(existing, update_ops)},
         )
-        if "status" in update_ops:
-            await self._emit_link_event(
-                "link.status_changed",
-                merged_doc,
-                extra={
-                    "old_status": existing.status.value,
-                    "new_status": UrlStatus(update_ops["status"]).value,
-                    "reason": None,
-                },
-            )
 
         return merged_doc
 
@@ -1501,50 +1496,6 @@ class UrlService:
 
 
 # ── Module-level helpers ──────────────────────────────────────────────────────
-
-
-_META_TAGS_PUBLIC_FIELDS = ("title", "description", "image", "color")
-
-
-def _event_change_value(field_name: str, value: object) -> object:
-    """Project one changed value into its public wire form.
-
-    Secrets and internal bookkeeping are stripped structurally here so
-    every producer of the changes map inherits the guarantee: password
-    material never rides the backbone, meta_tags keep only their public
-    fields (``updated_ip``/``updated_at``/``image_meta`` are internal),
-    and datetimes are ISO-8601 like every other timestamp on the wire.
-    """
-    if value is None:
-        return None
-    if isinstance(value, UrlStatus):
-        return value.value
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if field_name == "meta_tags":
-        raw = value.model_dump() if isinstance(value, LinkMetaTags) else dict(value)
-        return {k: raw.get(k) for k in _META_TAGS_PUBLIC_FIELDS}
-    return value
-
-
-def _event_changes(existing: UrlV2Doc, update_ops: dict) -> dict:
-    """update_ops → the public ``changes`` map for link.updated."""
-    changes: dict = {}
-    for field_name, new_value in update_ops.items():
-        if field_name == "updated_at":
-            continue
-        old_value = getattr(existing, field_name, None)
-        if field_name == "password":
-            # Presence booleans only — hashes must never ride the backbone
-            # (same posture as ClickEvent's password strip).
-            old_value = old_value is not None
-            new_value = new_value is not None
-            field_name = "password_protected"
-        changes[field_name] = {
-            "old": _event_change_value(field_name, old_value),
-            "new": _event_change_value(field_name, new_value),
-        }
-    return changes
 
 
 def _raise_for_status(status: UrlStatus) -> None:

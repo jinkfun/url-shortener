@@ -8,8 +8,12 @@ Catalog governance (the forever-contract rules):
 - An event is a fact someone would act on without having been there.
 - Payload = full resource snapshot + event context. Additive changes only;
   remove/rename = envelope version bump.
-- Per-field events are never minted unless the reaction class differs
-  (``link.status_changed`` exists; ``link.password_changed`` never will).
+- Events split by CAUSER, not by field: actor edits (owner, API key,
+  connected app) ride ``link.updated`` and its ``changes`` map — status
+  included; system-discovered facts get named events (``link.expired``
+  today; ``link.blocked`` when the safety framework ships a producer).
+  ``link.status_changed`` was cut for violating this: it only ever fired
+  for owner edits and double-fired alongside ``link.updated``.
 - ``link.clicked`` fires for every TRACKED click including bots (``is_bot``
   rides the payload). Blocked bots on ``block_bots`` links produce no click
   and therefore no event — deliberate: a dedicated ``bot.detected`` event
@@ -65,13 +69,6 @@ class LinkLifecyclePayload(_PayloadBase):
 class LinkUpdatedPayload(_PayloadBase):
     link: LinkSnapshot
     changes: dict[str, dict[str, Any]]  # field -> {"old": …, "new": …}
-
-
-class LinkStatusChangedPayload(_PayloadBase):
-    link: LinkSnapshot
-    old_status: str
-    new_status: str
-    reason: str | None = None
 
 
 class LinkClickedPayload(_PayloadBase):
@@ -149,8 +146,8 @@ EVENT_REGISTRY: dict[str, EventTypeSpec] = {
             name="link.updated",
             category="link",
             description=(
-                "A short link was edited. `changes` maps each edited field "
-                "to its old and new values."
+                "A short link was edited (any field, status included). "
+                "`changes` maps each edited field to its old and new values."
             ),
             frequency="low",
             payload_model=LinkUpdatedPayload,
@@ -171,21 +168,6 @@ EVENT_REGISTRY: dict[str, EventTypeSpec] = {
             frequency="low",
             payload_model=LinkLifecyclePayload,
             sample=lambda: {"link": _sample_link()},
-        ),
-        EventTypeSpec(
-            name="link.status_changed",
-            category="link",
-            description=(
-                "A link's status changed (activated, deactivated, blocked, expired)."
-            ),
-            frequency="low",
-            payload_model=LinkStatusChangedPayload,
-            sample=lambda: {
-                "link": {**_sample_link(), "status": "BLOCKED"},
-                "old_status": "ACTIVE",
-                "new_status": "BLOCKED",
-                "reason": "abuse_report",
-            },
         ),
         EventTypeSpec(
             name="link.clicked",

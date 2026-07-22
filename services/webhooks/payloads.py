@@ -9,13 +9,14 @@ ever reach a payload.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from ua_parser import parse as ua_parse
 
 from infrastructure.geoip import GeoIPService
 from schemas.models.base import ANONYMOUS_OWNER_ID
-from schemas.models.url import UrlV2Doc
+from schemas.models.url import LinkMetaTags, UrlStatus, UrlV2Doc
 from services.click.bot_detection import get_bot_name, is_bot_request
 from services.click.events import ClickEvent
 from services.click.handlers import classify_device
@@ -49,6 +50,51 @@ def link_owner_id(doc: UrlV2Doc) -> str | None:
     if doc.owner_id == ANONYMOUS_OWNER_ID:
         return None
     return str(doc.owner_id)
+
+
+_META_TAGS_PUBLIC_FIELDS = ("title", "description", "image", "color")
+
+
+def _event_change_value(field_name: str, value: object) -> object:
+    """Project one changed value into its public wire form.
+
+    Secrets and internal bookkeeping are stripped structurally here so
+    every producer of the changes map inherits the guarantee: password
+    material never rides the backbone, meta_tags keep only their public
+    fields (``updated_ip``/``updated_at``/``image_meta`` are internal),
+    and datetimes are ISO-8601 like every other timestamp on the wire.
+    """
+    if value is None:
+        return None
+    if isinstance(value, UrlStatus):
+        return value.value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if field_name == "meta_tags":
+        raw = value.model_dump() if isinstance(value, LinkMetaTags) else dict(value)
+        return {k: raw.get(k) for k in _META_TAGS_PUBLIC_FIELDS}
+    return value
+
+
+def event_changes(existing: UrlV2Doc, update_ops: dict) -> dict:
+    """update_ops → the public ``changes`` map for link.updated. Shared by
+    the single-item and bulk producers so the wire shape cannot fork."""
+    changes: dict = {}
+    for field_name, new_value in update_ops.items():
+        if field_name == "updated_at":
+            continue
+        old_value = getattr(existing, field_name, None)
+        if field_name == "password":
+            # Presence booleans only — hashes must never ride the backbone
+            # (same posture as ClickEvent's password strip).
+            old_value = old_value is not None
+            new_value = new_value is not None
+            field_name = "password_protected"
+        changes[field_name] = {
+            "old": _event_change_value(field_name, old_value),
+            "new": _event_change_value(field_name, new_value),
+        }
+    return changes
 
 
 def build_link_expired(doc: UrlV2Doc, reason: str) -> DomainEvent | None:

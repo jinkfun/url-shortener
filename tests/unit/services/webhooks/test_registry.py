@@ -19,7 +19,6 @@ EXPECTED_EVENTS = {
     "link.created",
     "link.updated",
     "link.deleted",
-    "link.status_changed",
     "link.clicked",
     "link.expired",
 }

@@ -38,7 +38,7 @@ def _oid(n: int) -> ObjectId:
 
 
 def make_bulk_service(
-    url_repo=None, url_cache=None, kv=None, url_service=None
+    url_repo=None, url_cache=None, kv=None, url_service=None, events=None
 ) -> BulkUrlService:
     # The default url_service mock answers "available" for every alias
     # (AsyncMock truthiness); move tests override check_alias_available.
@@ -49,6 +49,7 @@ def make_bulk_service(
         kv=kv,
         system_default_domain=SYSTEM_DEFAULT_DOMAIN,
         og_ttl_seconds=86_400,
+        events=events,
     )
 
 
@@ -1037,3 +1038,57 @@ class TestMoveDomainParity:
         report = await bulk.bulk_move_domain([_oid(1)], TENANT, USER_OID)
         assert report.results[0].ok is True
         bulk_repo.update_by_ids_and_owner.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Webhook event emission — bulk must be indistinguishable from a loop
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _CapturingSink:
+    def __init__(self) -> None:
+        self.events = []
+
+    async def emit(self, event) -> None:
+        self.events.append(event)
+
+
+class TestBulkEventEmission:
+    @pytest.mark.asyncio
+    async def test_set_status_emits_one_updated_per_changed_item(self):
+        active = make_url_v2_doc(url_id=_oid(1), alias="one")
+        already = make_url_v2_doc(url_id=_oid(2), alias="two", status="INACTIVE")
+        url_repo = AsyncMock()
+        url_repo.find_by_ids_and_owner.return_value = [active, already]
+        url_repo.update_by_ids_and_owner.return_value = 1
+        sink = _CapturingSink()
+        svc = make_bulk_service(url_repo, AsyncMock(), events=sink)
+
+        await svc.bulk_set_status([_oid(1), _oid(2)], UrlStatus.INACTIVE, USER_OID)
+        await drain_edge_tasks(svc)
+
+        # One event for the changed item; the same-status no-op emits nothing.
+        assert len(sink.events) == 1
+        event = sink.events[0]
+        assert event.type == "link.updated"
+        assert event.owner_id == str(USER_OID)
+        assert event.data["link"]["status"] == "INACTIVE"  # post-state snapshot
+        assert event.data["changes"]["status"] == {"old": "ACTIVE", "new": "INACTIVE"}
+
+    @pytest.mark.asyncio
+    async def test_delete_emits_one_deleted_per_item(self):
+        docs = [
+            make_url_v2_doc(url_id=_oid(1), alias="one"),
+            make_url_v2_doc(url_id=_oid(2), alias="two"),
+        ]
+        url_repo = AsyncMock()
+        url_repo.find_by_ids_and_owner.return_value = docs
+        url_repo.delete_by_ids_and_owner.return_value = 2
+        sink = _CapturingSink()
+        svc = make_bulk_service(url_repo, AsyncMock(), events=sink)
+
+        await svc.bulk_delete([_oid(1), _oid(2)], USER_OID)
+        await drain_edge_tasks(svc)
+
+        assert [e.type for e in sink.events] == ["link.deleted", "link.deleted"]
+        assert {e.data["link"]["alias"] for e in sink.events} == {"one", "two"}
