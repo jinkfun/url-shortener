@@ -1503,27 +1503,47 @@ class UrlService:
 # ── Module-level helpers ──────────────────────────────────────────────────────
 
 
-def _event_changes(existing: UrlV2Doc, update_ops: dict) -> dict:
-    """update_ops → the public ``changes`` map for link.updated.
+_META_TAGS_PUBLIC_FIELDS = ("title", "description", "image", "color")
 
-    Password values are structurally redacted to presence booleans —
-    hashes must never ride the event backbone (same posture as
-    ClickEvent's password strip).
+
+def _event_change_value(field_name: str, value: object) -> object:
+    """Project one changed value into its public wire form.
+
+    Secrets and internal bookkeeping are stripped structurally here so
+    every producer of the changes map inherits the guarantee: password
+    material never rides the backbone, meta_tags keep only their public
+    fields (``updated_ip``/``updated_at``/``image_meta`` are internal),
+    and datetimes are ISO-8601 like every other timestamp on the wire.
     """
+    if value is None:
+        return None
+    if isinstance(value, UrlStatus):
+        return value.value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if field_name == "meta_tags":
+        raw = value.model_dump() if isinstance(value, LinkMetaTags) else dict(value)
+        return {k: raw.get(k) for k in _META_TAGS_PUBLIC_FIELDS}
+    return value
+
+
+def _event_changes(existing: UrlV2Doc, update_ops: dict) -> dict:
+    """update_ops → the public ``changes`` map for link.updated."""
     changes: dict = {}
     for field_name, new_value in update_ops.items():
         if field_name == "updated_at":
             continue
         old_value = getattr(existing, field_name, None)
         if field_name == "password":
+            # Presence booleans only — hashes must never ride the backbone
+            # (same posture as ClickEvent's password strip).
             old_value = old_value is not None
             new_value = new_value is not None
             field_name = "password_protected"
-        if isinstance(old_value, UrlStatus):
-            old_value = old_value.value
-        if isinstance(new_value, UrlStatus):
-            new_value = new_value.value
-        changes[field_name] = {"old": old_value, "new": new_value}
+        changes[field_name] = {
+            "old": _event_change_value(field_name, old_value),
+            "new": _event_change_value(field_name, new_value),
+        }
     return changes
 
 

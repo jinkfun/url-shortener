@@ -94,3 +94,45 @@ class TestLinkClicked:
         event = build_link_clicked(_click_event(user_agent="curl/8.0"), "spoo.me")
         assert event is not None
         assert event.data["is_bot"] is True
+
+
+class TestEventChanges:
+    def test_meta_tags_change_strips_internal_fields(self):
+        from schemas.models.url import LinkMetaTags
+        from services.url_service import _event_changes
+
+        existing = _doc()
+        update_ops = {
+            "meta_tags": {
+                "title": "New",
+                "description": None,
+                "image": None,
+                "color": "#112233",
+                "image_meta": None,
+                "updated_at": datetime.now(timezone.utc),
+                "updated_ip": "203.0.113.9",
+            },
+            "password": "new-argon2-hash",
+            "expire_after": datetime(2026, 8, 1, tzinfo=timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        }
+        changes = _event_changes(existing, update_ops)
+
+        assert "updated_at" not in changes
+        assert changes["meta_tags"]["new"] == {
+            "title": "New",
+            "description": None,
+            "image": None,
+            "color": "#112233",
+        }
+        assert "203.0.113.9" not in str(changes)
+        assert "argon2" not in str(changes)
+        assert changes["password_protected"] == {"old": True, "new": True}
+        assert changes["expire_after"]["new"] == "2026-08-01T00:00:00+00:00"
+        # old side of a model-typed field sanitizes the same way
+        existing_with_meta = existing.model_copy(
+            update={"meta_tags": LinkMetaTags(title="Old", updated_ip="198.51.100.7")}
+        )
+        changes2 = _event_changes(existing_with_meta, update_ops)
+        assert changes2["meta_tags"]["old"]["title"] == "Old"
+        assert "198.51.100.7" not in str(changes2)
