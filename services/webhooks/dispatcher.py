@@ -38,7 +38,12 @@ def make_delivery_row(
         "webhook_id": new_webhook_id(),
         "is_test": False,
         "rendered_body": None,
-        "dropped_since_last": 0,
+        # Carry the drop counter accumulated while this endpoint was over
+        # the pending cap; the renderer surfaces it and record_success
+        # resets it, so the signal reaches the subscriber on the next
+        # delivery that lands. At-least-once: consecutive rows may repeat
+        # the same count until one succeeds.
+        "dropped_since_last": endpoint.dropped_count,
         "status": DeliveryStatus.PENDING.value,
         "attempts": [],
         "attempt_count": 0,
@@ -75,7 +80,10 @@ class WebhookDispatcher:
         for endpoint in endpoints:
             # The pending cap protects the queue itself. A subscriber
             # who can't drink max_pending deliveries has already lost the
-            # facts — counting beats pretending.
+            # facts — counting beats pretending. Count-then-insert is
+            # deliberately non-atomic: concurrent dispatchers can overshoot
+            # by a batch, which is fine for a protective backstop; an exact
+            # cap would cost a reservation counter on every dispatch.
             if (
                 await self._delivery_repo.count_pending(endpoint.id)
                 >= self._max_pending

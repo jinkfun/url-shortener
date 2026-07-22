@@ -407,6 +407,27 @@ def test_send_test_delivers_signed_sample_synchronously():
         )
 
 
+def test_send_test_flag_denied_403():
+    """Test sends initiate outbound calls, so they carry the create gate."""
+    app, _, _endpoint_repo, _ = _build()
+    with _NO_SSRF, TestClient(app) as c:
+        created = c.post(_URL, json=_create_body()).json()
+    app2, _, _, _ = _build(flags=_DenyFlags())
+    # Same service state is not shared across builds; recreate inline:
+    # simpler to flip flags on one app via override swap.
+    del app2
+    app.dependency_overrides[_flag_override_key()] = lambda: _DenyFlags()
+    with _POST_OK, TestClient(app) as c:
+        resp = c.post(f"{_URL}/{created['id']}/test", json={})
+    assert resp.status_code == 403
+
+
+def _flag_override_key():
+    from dependencies import get_feature_flag_service
+
+    return get_feature_flag_service
+
+
 def test_send_test_unknown_type_400():
     app, _, _, _ = _build()
     with _NO_SSRF, _POST_OK, TestClient(app) as c:

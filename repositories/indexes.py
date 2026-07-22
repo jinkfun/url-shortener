@@ -188,7 +188,13 @@ async def _ensure_ttl_index(col, expire_after_seconds: int) -> None:
     except OperationFailure as e:
         if getattr(e, "code", None) != 85:  # IndexOptionsConflict
             raise
-        await col.drop_index("ttl_created_at")
+        try:
+            await col.drop_index("ttl_created_at")
+        except OperationFailure as drop_err:
+            # Code 27 = IndexNotFound: a racing instance (rolling deploy)
+            # already dropped it — recreating below is still correct.
+            if getattr(drop_err, "code", None) != 27:
+                raise
         await col.create_index(
             [("created_at", 1)],
             expireAfterSeconds=expire_after_seconds,

@@ -53,7 +53,7 @@ class UpdateWebhookEndpointRequest(_WebhookFieldsMixin):
 
     url: str | None = Field(default=None, max_length=2048)
     events: list[str] | None = Field(default=None, min_length=1, max_length=32)
-    description: str | None = None
+    description: str | None = Field(default=None, max_length=256)
     scope_links: list[str] | None = Field(default=None, max_length=256)
     flavor: WebhookFlavor | None = None
     status: WebhookStatus | None = Field(

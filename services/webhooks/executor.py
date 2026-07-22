@@ -34,6 +34,7 @@ from services.webhooks.signing import (
     HEADER_TIMESTAMP,
     sign,
 )
+from shared.datetime_utils import as_aware_utc
 
 log = get_logger(__name__)
 
@@ -103,9 +104,20 @@ class DeliveryExecutor:
     # ── One attempt ──────────────────────────────────────────────────────
 
     async def attempt(self, row: WebhookDeliveryDoc) -> None:
+        # Test sends and manual retries are single-shot: they must never
+        # touch endpoint health counters or enter the retry ladder — a
+        # failing test would otherwise auto-disable a real endpoint, and a
+        # passing one would reset a real failure streak.
+        single_shot = row.is_test or row.status != DeliveryStatus.PENDING
+
         endpoint = await self._endpoints.find_by_id(row.endpoint_id)
-        if endpoint is None or endpoint.status != WebhookStatus.ACTIVE:
+        if endpoint is None or endpoint.status == WebhookStatus.DISABLED:
             await self._deliveries.mark_failed(row.id, "endpoint_inactive")
+            return
+        if endpoint.status == WebhookStatus.PAUSED and not single_shot:
+            # Paused is a temporary state the owner controls: hold the
+            # delivery instead of killing it, recheck in five minutes.
+            await self._deliveries.defer(row.id, delay_seconds=300)
             return
 
         body = row.rendered_body
@@ -114,11 +126,31 @@ class DeliveryExecutor:
             if body is None:
                 return  # _render already recorded the terminal failure
 
+        try:
+            headers = self._headers(row.webhook_id, body, endpoint)
+        except Exception as exc:
+            # Unreadable secret (e.g. SECRET_KEY rotated: AES-GCM auth fails
+            # for every stored secret). Without this guard the exception
+            # escapes before any attempt is recorded, the lease expires, and
+            # the same row re-claims forever — a silent livelock. Terminate
+            # the row and disable the endpoint loudly instead; re-enabling
+            # after re-creating the endpoint (new secret) recovers.
+            log.error(
+                "webhook_secret_unreadable",
+                endpoint_id=str(endpoint.id),
+                webhook_id=row.webhook_id,
+                error_type=type(exc).__name__,
+            )
+            await self._deliveries.mark_failed(row.id, "secret_unreadable")
+            if not single_shot:
+                await self._disable(endpoint, EndpointDisabledReason.SECRET_UNREADABLE)
+            return
+
         started = time.monotonic()
         result = await post_public(
             endpoint.url,
             body,
-            headers=self._headers(row.webhook_id, body, endpoint),
+            headers=headers,
             timeout=self._timeout,
         )
         duration_ms = int((time.monotonic() - started) * 1000)
@@ -135,7 +167,8 @@ class DeliveryExecutor:
             await self._deliveries.record_attempt_and_finish(
                 row.id, attempt, DeliveryStatus.SUCCESS
             )
-            await self._endpoints.record_success(endpoint.id)
+            if not single_shot:
+                await self._endpoints.record_success(endpoint.id)
             log.info(
                 "webhook_delivered",
                 endpoint_id=str(endpoint.id),
@@ -157,6 +190,14 @@ class DeliveryExecutor:
             duration_ms=duration_ms,
             attempt=row.attempt_count + 1,
         )
+
+        if single_shot:
+            # One recorded attempt, terminal, health untouched: the caller
+            # (test send / manual retry) reads the outcome synchronously.
+            await self._deliveries.record_attempt_and_finish(
+                row.id, attempt, DeliveryStatus.FAILED
+            )
+            return
 
         if result.status_code == 410:
             await self._deliveries.record_attempt_and_finish(
@@ -224,9 +265,9 @@ class DeliveryExecutor:
             endpoint.signing_secret_enc, self._master_secret, domain=SECRET_ENC_DOMAIN
         )
         signatures = [sign(webhook_id, ts, body, secret)]
+        grace_expires = as_aware_utc(endpoint.previous_secret_expires_at)
         if endpoint.previous_secret_enc and (
-            endpoint.previous_secret_expires_at
-            and endpoint.previous_secret_expires_at > datetime.now(timezone.utc)
+            grace_expires and grace_expires > datetime.now(timezone.utc)
         ):
             previous = decrypt_secret(
                 endpoint.previous_secret_enc,

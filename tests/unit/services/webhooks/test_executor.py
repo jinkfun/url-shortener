@@ -208,12 +208,75 @@ class TestFailurePaths:
         )
 
     @pytest.mark.asyncio
-    async def test_inactive_endpoint_terminal(self):
-        executor, deliveries, _, _ = _make(_endpoint(status=WebhookStatus.PAUSED))
+    async def test_disabled_endpoint_terminal(self):
+        executor, deliveries, _, _ = _make(_endpoint(status=WebhookStatus.DISABLED))
         with patch("services.webhooks.executor.post_public", _post(204)) as post:
             await executor.attempt(_delivery())
         deliveries.mark_failed.assert_awaited_once()
         post.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_paused_endpoint_defers_instead_of_failing(self):
+        """Paused is owner-controlled and temporary: the delivery waits."""
+        executor, deliveries, _, _ = _make(_endpoint(status=WebhookStatus.PAUSED))
+        with patch("services.webhooks.executor.post_public", _post(204)) as post:
+            await executor.attempt(_delivery())
+        deliveries.defer.assert_awaited_once()
+        deliveries.mark_failed.assert_not_awaited()
+        post.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unreadable_secret_terminates_and_disables(self):
+        """SECRET_KEY rotation must degrade loudly, never livelock: the row
+        is terminally failed and the endpoint disabled with its own reason."""
+        endpoint = _endpoint(signing_secret_enc="bm90LXJlYWwtY2lwaGVydGV4dA==")
+        executor, deliveries, endpoints, _ = _make(endpoint)
+        with patch("services.webhooks.executor.post_public", _post(204)) as post:
+            await executor.attempt(_delivery())
+        deliveries.mark_failed.assert_awaited_once()
+        assert deliveries.mark_failed.await_args[0][1] == "secret_unreadable"
+        endpoints.disable.assert_awaited_once_with(
+            endpoint.id, EndpointDisabledReason.SECRET_UNREADABLE
+        )
+        post.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_failed_test_send_is_single_shot(self):
+        """A failing TEST send records one attempt and stops: no reschedule,
+        no exhaustion counting, no auto-disable — testing a broken endpoint
+        must never mutate its real health."""
+        endpoint = _endpoint()
+        executor, deliveries, endpoints, _ = _make(endpoint)
+        with patch("services.webhooks.executor.post_public", _post(500)):
+            await executor.attempt(_delivery(is_test=True))
+        assert (
+            deliveries.record_attempt_and_finish.await_args[0][2]
+            is DeliveryStatus.FAILED
+        )
+        deliveries.record_attempt_and_reschedule.assert_not_awaited()
+        endpoints.record_exhausted.assert_not_awaited()
+        endpoints.disable.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_passing_test_send_does_not_reset_streak(self):
+        endpoint = _endpoint(consecutive_failures=7)
+        executor, _, endpoints, _ = _make(endpoint)
+        with patch("services.webhooks.executor.post_public", _post(204)):
+            await executor.attempt(_delivery(is_test=True))
+        endpoints.record_success.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_manual_retry_of_completed_row_is_single_shot(self):
+        endpoint = _endpoint()
+        executor, deliveries, endpoints, _ = _make(endpoint)
+        row = _delivery(
+            status=DeliveryStatus.FAILED,
+            rendered_body='{"type":"link.clicked","data":{}}',
+        )
+        with patch("services.webhooks.executor.post_public", _post(410)):
+            await executor.attempt(row)
+        endpoints.disable.assert_not_awaited()
+        deliveries.record_attempt_and_reschedule.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_event_ttl_race_terminal_not_crash(self):

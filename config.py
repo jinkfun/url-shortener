@@ -645,6 +645,10 @@ class AppSettings(BaseSettings):
             self.meta_tags = MetaTagsSettings()
         if self.webhooks is None:
             self.webhooks = WebhookSettings()
+        if self.webhooks.enabled and not self.secret_key:
+            # Signing secrets are encrypted with a key derived from
+            # SECRET_KEY; an empty master would mean a predictable key.
+            raise ValueError("SECRET_KEY must be set when WEBHOOKS_ENABLED=true")
 
         # The DCV mock makes domain verification succeed unconditionally —
         # in production that would let anyone claim any domain. Refuse to

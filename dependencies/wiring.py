@@ -448,10 +448,13 @@ def wire_services(app: FastAPI, settings: AppSettings, redis_client) -> None:
         feature_flag_repo, feature_flag_cache
     )
 
-    # Inline rung also needs the click feed: wrap the inline click sink so
-    # link.clicked dispatch happens at emit time. Stream
-    # deployments get this from the worker's `webhooks` group instead.
-    if isinstance(app.state.domain_event_sink, InlineDomainEventSink):
+    # Whenever clicks are tracked inline, link.clicked webhooks must fan
+    # out at emit time — the worker's stream group only sees clicks that
+    # ride the stream. Keying on the CLICK sink (not the domain sink)
+    # covers both the Mongo-only rung AND the queue-Redis-present-but-
+    # CLICK_EVENTS_SINK=inline combination, which would otherwise leave
+    # click webhooks silently unfired.
+    if wh_settings.enabled and isinstance(app.state.click_sink, InlineSink):
         app.state.click_sink = WebhookFanoutClickSink(
             app.state.click_sink,
             webhook_dispatcher,

@@ -210,8 +210,10 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         # ── Shutdown ─────────────────────────────────────────────────────────
         if webhook_executor_task is not None:
             webhook_executor_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await webhook_executor_task
+            # Bounded: a delivery attempt mid-flight has a 15s HTTP timeout;
+            # don't let a pathological one hold the whole app shutdown.
+            with suppress(asyncio.CancelledError, asyncio.TimeoutError, TimeoutError):
+                await asyncio.wait_for(webhook_executor_task, timeout=10)
         await mongo_client.close()
         if redis_client is not None:
             await redis_client.aclose()

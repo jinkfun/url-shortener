@@ -28,4 +28,7 @@ class WebhookFlavor(str, Enum):
 class EndpointDisabledReason(str, Enum):
     GONE = "gone"  # endpoint returned 410
     CONSECUTIVE_FAILURES = "consecutive_failures"
+    # Stored secret no longer decrypts (master key rotated) — every future
+    # delivery would fail identically, so the endpoint is disabled loudly.
+    SECRET_UNREADABLE = "secret_unreadable"
     ADMIN = "admin"

@@ -3,8 +3,9 @@
 Headers: ``webhook-id`` / ``webhook-timestamp`` / ``webhook-signature``.
 Signature: ``v1,`` + base64(HMAC-SHA256(secret, "{msg_id}.{timestamp}.{body}")).
 
-The secret is ``whsec_`` + base64(24 random bytes); stored hash-only
-(SHA-256), shown once at creation. The BODY is frozen across retries
+The secret is ``whsec_`` + base64(24 random bytes); shown once at
+creation, stored AES-GCM encrypted (infrastructure/crypto.py) because
+the server signs with it at delivery time. The BODY is frozen across retries
 but the timestamp — and therefore the signature — is fresh per
 attempt: replay protection requires it.
 """
@@ -32,10 +33,6 @@ def new_webhook_id() -> str:
 
 def generate_signing_secret() -> str:
     return SECRET_PREFIX + base64.b64encode(secrets.token_bytes(_SECRET_BYTES)).decode()
-
-
-def hash_signing_secret(secret: str) -> str:
-    return hashlib.sha256(secret.encode()).hexdigest()
 
 
 def secret_display_prefix(secret: str) -> str:

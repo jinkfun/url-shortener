@@ -160,6 +160,16 @@ class TestDispatcher:
         assert rows[0]["rendered_body"] is None
 
     @pytest.mark.asyncio
+    async def test_rows_carry_endpoint_dropped_count(self):
+        """The drop counter accumulated over the pending cap rides the next
+        dispatched row so the subscriber learns what it missed."""
+        ep = _endpoint(dropped_count=7)
+        dispatcher, _, delivery_repo, _ = self._make([ep])
+        await dispatcher.dispatch(_click_event())
+        rows = delivery_repo.insert_many_rows.await_args[0][0]
+        assert rows[0]["dropped_since_last"] == 7
+
+    @pytest.mark.asyncio
     async def test_pending_cap_drops_and_counts(self):
         ep = _endpoint()
         dispatcher, _, delivery_repo, endpoint_repo = self._make([ep], pending=10)

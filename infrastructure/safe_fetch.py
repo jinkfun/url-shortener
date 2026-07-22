@@ -59,10 +59,19 @@ class FetchedBody:
     final_url: str
 
 
+_NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+
+
 def _is_public(ip: str) -> bool:
     addr = ipaddress.ip_address(ip)
-    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
-        addr = addr.ipv4_mapped
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped:
+            addr = addr.ipv4_mapped
+        # NAT64 (RFC 6052) reports is_global=True, but on a NAT64/DNS64
+        # host 64:ff9b::7f00:1 reaches 127.0.0.1 — reject the whole
+        # prefix; a translation address is never a legitimate target.
+        elif addr in _NAT64_PREFIX:
+            return False
     # is_global (not a flag union) catches CGNAT 100.64.0.0/10 and
     # transitional ranges the union missed; exclude multicast, which is
     # is_global=True but must never be a fetch target.
@@ -260,7 +269,9 @@ async def post_public(
         if parsed.scheme != "https":
             return PostResult(None, "non-https URL", None)
         ip = await _resolve_public_ip(parsed.host)
-    except FetchHardError as exc:
+    except (FetchHardError, FetchTransientError, httpx.InvalidURL) as exc:
+        # Transient DNS failures included: delivery outcomes are DATA for
+        # the retry ladder, never exceptions that skip attempt recording.
         return PostResult(None, str(exc), None)
 
     pinned = parsed.copy_with(host=_bracket(ip))

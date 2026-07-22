@@ -9,11 +9,13 @@ POST   /api/v1/webhooks/{id}/test                        — send a sample event
 GET    /api/v1/webhooks/{id}/deliveries                  — delivery log
 POST   /api/v1/webhooks/{id}/deliveries/{delivery_id}/retry — manual redelivery
 
-Gating: the `webhooks` feature flag is enforced on CREATE only —
-write-side gating; a user who loses the flag keeps managing (and pausing)
-what they already have, and stopping their deliveries is an explicit admin
-action. Flag failure is an honest 403, never a 404: the catalog endpoint
-below is public documentation-as-API, so there is nothing to hide.
+Gating: the `webhooks` feature flag is enforced on the operations that
+INITIATE something — create, test sends, manual retries. Passive
+management (list, get, patch, delete, delivery log) stays ungated so a
+user who loses the flag keeps managing and pausing what they already
+have; stopping their background deliveries is an explicit admin action.
+Flag failure is an honest 403, never a 404: the catalog endpoint below
+is public documentation-as-API, so there is nothing to hide.
 """
 
 from __future__ import annotations
@@ -28,7 +30,6 @@ from dependencies.auth import (
     WEBHOOKS_MANAGE_SCOPES,
     WEBHOOKS_READ_SCOPES,
     CurrentUser,
-    require_scopes,
     require_scopes_verified,
 )
 from errors import ValidationError
@@ -57,7 +58,9 @@ router = APIRouter(tags=["Webhooks"])
 ManageUser = Annotated[
     CurrentUser, Depends(require_scopes_verified(WEBHOOKS_MANAGE_SCOPES))
 ]
-ReadUser = Annotated[CurrentUser, Depends(require_scopes(WEBHOOKS_READ_SCOPES))]
+ReadUser = Annotated[
+    CurrentUser, Depends(require_scopes_verified(WEBHOOKS_READ_SCOPES))
+]
 
 
 def _oid(value: str, what: str) -> ObjectId:
@@ -227,10 +230,14 @@ async def test_endpoint(
     body: TestWebhookRequest,
     user: ManageUser,
     webhook_service: WebhookSvc,
+    flag_svc: FeatureFlagSvc,
 ) -> WebhookDeliveryResponse:
     """Send a sample of any catalog event through the real pipeline —
     rendered in the endpoint's flavor, signed with its real secret — and
     return the delivery outcome synchronously."""
+    # Test sends initiate outbound calls, so they carry the same flag gate
+    # as creation; passive management of existing endpoints does not.
+    await flag_svc.require(WEBHOOKS_FLAG, user)
     row = await webhook_service.send_test(
         _oid(endpoint_id, "endpoint"), user.user_id, body.event_type
     )
@@ -283,9 +290,11 @@ async def retry_delivery(
     delivery_id: Annotated[str, Path()],
     user: ManageUser,
     webhook_service: WebhookSvc,
+    flag_svc: FeatureFlagSvc,
 ) -> WebhookDeliveryResponse:
     """Redeliver a completed delivery: same `webhook-id`, same body, fresh
     attempt — consumers dedup on `webhook-id`."""
+    await flag_svc.require(WEBHOOKS_FLAG, user)
     row = await webhook_service.retry_delivery(
         _oid(endpoint_id, "endpoint"),
         _oid(delivery_id, "delivery"),

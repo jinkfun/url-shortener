@@ -233,3 +233,25 @@ class TestCustomDomainSettings:
     def test_prefixed_max_per_user_overrides_default(self, monkeypatch):
         monkeypatch.setenv("CUSTOM_DOMAINS_MAX_PER_USER", "10")
         assert CustomDomainSettings().max_per_user == 10
+
+
+class TestWebhookSettingsGuard:
+    def test_enabled_webhooks_require_secret_key(self, monkeypatch):
+        """An empty master secret would derive a predictable encryption
+        key for signing secrets — startup must refuse, not warn."""
+        import pytest as _pytest
+
+        from config import AppSettings
+
+        monkeypatch.setenv("WEBHOOKS_ENABLED", "true")
+        monkeypatch.delenv("SECRET_KEY", raising=False)
+        monkeypatch.delenv("FLASK_SECRET_KEY", raising=False)
+        with _pytest.raises(Exception, match="SECRET_KEY"):
+            AppSettings(secret_key="", flask_secret_key="")
+
+    def test_enabled_webhooks_accept_configured_secret(self, monkeypatch):
+        from config import AppSettings
+
+        monkeypatch.setenv("WEBHOOKS_ENABLED", "true")
+        settings = AppSettings(secret_key="a-real-secret")
+        assert settings.webhooks.enabled is True

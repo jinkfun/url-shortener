@@ -122,12 +122,27 @@ class WebhookDeliveryRepository(BaseRepository[WebhookDeliveryDoc]):
             },
         )
 
+    async def defer(self, delivery_id: ObjectId, *, delay_seconds: int) -> None:
+        """Push a delivery back without recording an attempt — used while
+        its endpoint is paused. Not a retry: the ladder is untouched."""
+        await self._update(
+            {"_id": delivery_id},
+            {
+                "$set": {
+                    "next_attempt_at": datetime.now(timezone.utc)
+                    + timedelta(seconds=delay_seconds),
+                    "claimed_until": None,
+                }
+            },
+        )
+
     async def mark_failed(self, delivery_id: ObjectId, reason: str) -> None:
         """Terminal failure without an HTTP attempt (endpoint inactive,
         event row TTL-expired)."""
         await self._update(
             {"_id": delivery_id},
             {
+                "$inc": {"attempt_count": 1},
                 "$set": {
                     "status": DeliveryStatus.FAILED.value,
                     "completed_at": datetime.now(timezone.utc),

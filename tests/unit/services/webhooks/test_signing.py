@@ -7,7 +7,6 @@ import base64
 from services.webhooks.signing import (
     SECRET_PREFIX,
     generate_signing_secret,
-    hash_signing_secret,
     new_webhook_id,
     secret_display_prefix,
     sign,
@@ -30,11 +29,6 @@ class TestSecrets:
         prefix = secret_display_prefix(secret)
         assert secret.startswith(prefix)
         assert len(prefix) == len(SECRET_PREFIX) + 8
-
-    def test_hash_is_stable_and_not_the_secret(self):
-        secret = generate_signing_secret()
-        assert hash_signing_secret(secret) == hash_signing_secret(secret)
-        assert secret not in hash_signing_secret(secret)
 
 
 class TestSigning:
