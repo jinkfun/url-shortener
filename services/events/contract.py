@@ -1,7 +1,6 @@
 """DomainEvent — the pinned wire contract for the ``events:domain`` stream.
 
-Low-volume CRUD-shaped facts (link lifecycle, domain lifecycle, key
-creation) ride this stream; high-volume click facts stay on
+Low-volume CRUD-shaped facts (link lifecycle) ride this stream; high-volume click facts stay on
 ``events:clicks`` with their own contract (services/click/events.py).
 Consumers in any process decode this envelope — treat changes with the
 same discipline as edge_cache/contract.py: additive evolution only,

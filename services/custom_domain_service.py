@@ -34,9 +34,6 @@ from schemas.enums.domain_status import DomainStatus, VerificationMethod
 from schemas.models.custom_domain import LEGAL_TRANSITIONS, CustomDomainDoc
 from services.dns_preflight import check_cname, uses_cloudflare_dns
 from services.edge_provisioner.protocol import EdgeProvisioner
-from services.events.contract import DomainEvent
-from services.events.protocol import DomainEventSink
-from services.events.sinks import NullDomainEventSink
 from services.registrar.protocol import HostnameRegistrar
 from services.tenant_resolver.protocol import TenantResolver
 from services.verifiers.protocol import DomainVerifier, VerificationResult
@@ -74,7 +71,6 @@ class CustomDomainService:
         redis_client: aioredis.Redis | None = None,
         preflight_cname_target: str | None = None,
         url_service: UrlService | None = None,
-        events: DomainEventSink | None = None,
     ) -> None:
         self._repo = repo
         self._verifiers = verifiers
@@ -88,9 +84,6 @@ class CustomDomainService:
         self._preflight_cname_target = preflight_cname_target
         # None = cascade delete unavailable (tests). Production wiring sets this.
         self._url_service = url_service
-        # Domain-event sink (webhooks backbone). Null default keeps tests
-        # and self-host wiring unchanged; the sink never raises.
-        self._events = events or NullDomainEventSink()
 
     # ── Public API ───────────────────────────────────────────────────
 
@@ -235,7 +228,6 @@ class CustomDomainService:
                 bump_last_verified_at=True,
             )
             await self._invalidate_cache(doc.fqdn)
-            await self._emit_domain_event(doc, DomainStatus.ACTIVE, "domain.verified")
             log.info(
                 "audit.domain.verified",
                 fqdn=doc.fqdn,
@@ -513,9 +505,6 @@ class CustomDomainService:
         )
         await self._announce_eviction(doc, kind="suspended")
         await self._invalidate_cache(doc.fqdn)
-        await self._emit_domain_event(
-            doc, DomainStatus.SUSPENDED, "domain.suspended", reason=reason
-        )
         log.info(
             "audit.domain.suspended",
             fqdn=doc.fqdn,
@@ -523,28 +512,6 @@ class CustomDomainService:
             owner_id=str(doc.owner_id),
             reason=reason,
             suspending_actor=actor,
-        )
-
-    async def _emit_domain_event(
-        self,
-        doc: CustomDomainDoc,
-        status: DomainStatus,
-        event_type: str,
-        *,
-        reason: str | None = None,
-    ) -> None:
-        """Publish a domain lifecycle fact to the webhooks backbone."""
-        await self._events.emit(
-            DomainEvent(
-                type=event_type,
-                owner_id=str(doc.owner_id),
-                data={
-                    "domain_id": str(doc.id),
-                    "fqdn": doc.fqdn,
-                    "status": status.value,
-                    "reason": reason,
-                },
-            )
         )
 
     # ── Internal: state machine, quotas, blocklist, cache ────────────

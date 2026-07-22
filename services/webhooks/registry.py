@@ -97,13 +97,6 @@ class LinkExpiredPayload(_PayloadBase):
     reason: str  # "max_clicks_reached" | "time_expired"
 
 
-class DomainLifecyclePayload(_PayloadBase):
-    domain_id: str
-    fqdn: str
-    status: str
-    reason: str | None = None
-
-
 class WebhookTestPayload(_PayloadBase):
     message: str
 
@@ -134,7 +127,7 @@ def _sample_link() -> dict[str, Any]:
 @dataclass(frozen=True)
 class EventTypeSpec:
     name: str
-    category: str  # "link" | "domain"
+    category: str  # "link" today; new categories get their own wildcard for free
     description: str
     frequency: str  # "high" | "low"
     payload_model: type[BaseModel]
@@ -233,32 +226,6 @@ EVENT_REGISTRY: dict[str, EventTypeSpec] = {
             sample=lambda: {
                 "link": {**_sample_link(), "status": "EXPIRED", "max_clicks": 5000},
                 "reason": "max_clicks_reached",
-            },
-        ),
-        EventTypeSpec(
-            name="domain.verified",
-            category="domain",
-            description="A custom domain finished verification and is active.",
-            frequency="low",
-            payload_model=DomainLifecyclePayload,
-            sample=lambda: {
-                "domain_id": "666f1f77bcf86cd799439011",
-                "fqdn": "go.example.com",
-                "status": "active",
-                "reason": None,
-            },
-        ),
-        EventTypeSpec(
-            name="domain.suspended",
-            category="domain",
-            description="A custom domain was suspended (DNS no longer verifies).",
-            frequency="low",
-            payload_model=DomainLifecyclePayload,
-            sample=lambda: {
-                "domain_id": "666f1f77bcf86cd799439011",
-                "fqdn": "go.example.com",
-                "status": "suspended",
-                "reason": "dns_verification_failed",
             },
         ),
     )

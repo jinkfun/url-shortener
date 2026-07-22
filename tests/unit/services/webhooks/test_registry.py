@@ -22,8 +22,6 @@ EXPECTED_EVENTS = {
     "link.status_changed",
     "link.clicked",
     "link.expired",
-    "domain.verified",
-    "domain.suspended",
 }
 
 
@@ -53,9 +51,9 @@ class TestExpansion:
         }
 
     def test_concrete_names(self):
-        assert expand(["link.clicked", "domain.verified"]) == {
+        assert expand(["link.clicked", "link.expired"]) == {
             "link.clicked",
-            "domain.verified",
+            "link.expired",
         }
 
     def test_unknown_patterns_expand_to_nothing(self):

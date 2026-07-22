@@ -552,5 +552,4 @@ def wire_services(app: FastAPI, settings: AppSettings, redis_client) -> None:
         if cd_settings.cf_zone_id and not cd_settings.mock_dcv
         else None,
         url_service=app.state.url_service,
-        events=app.state.domain_event_sink,
     )

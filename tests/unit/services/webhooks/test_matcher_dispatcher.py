@@ -60,9 +60,9 @@ class TestEventLinkId:
         )
         assert event_link_id(event) == _LINK
 
-    def test_non_link_event_is_none(self):
+    def test_event_without_link_shape_is_none(self):
         event = DomainEvent(
-            type="domain.verified", owner_id=str(_OWNER), data={"fqdn": "x.com"}
+            type="webhook.test", owner_id=str(_OWNER), data={"message": "hi"}
         )
         assert event_link_id(event) is None
 
@@ -101,16 +101,14 @@ class TestMatcher:
         assert len(await matcher.match(_click_event())) == 1
 
     @pytest.mark.asyncio
-    async def test_scope_never_excludes_non_link_events(self):
+    async def test_unknown_event_type_never_matches(self):
+        """Types outside the registry match nothing, even against `*` —
+        wildcard expansion is registry-bounded by construction."""
         repo = AsyncMock()
-        repo.find_active_for_owner.return_value = [
-            _endpoint(events=["*"], scope=WebhookScope(links=[ObjectId()]))
-        ]
+        repo.find_active_for_owner.return_value = [_endpoint(events=["*"])]
         matcher = SubscriptionMatcher(repo, _no_cache())
-        event = DomainEvent(
-            type="domain.verified", owner_id=str(_OWNER), data={"fqdn": "x.com"}
-        )
-        assert len(await matcher.match(event)) == 1
+        event = DomainEvent(type="totally.unknown", owner_id=str(_OWNER), data={})
+        assert await matcher.match(event) == []
 
     @pytest.mark.asyncio
     async def test_cached_zero_short_circuits_mongo(self):
