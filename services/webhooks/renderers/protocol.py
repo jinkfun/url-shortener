@@ -15,5 +15,5 @@ class Renderer(Protocol):
     flavor: str
 
     def render(
-        self, event_type: str, timestamp: str, payload: dict[str, Any]
+        self, event_id: str, event_type: str, timestamp: str, payload: dict[str, Any]
     ) -> str: ...

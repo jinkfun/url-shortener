@@ -27,8 +27,21 @@ def short_url_of(domain: str, alias: str) -> str:
     return f"https://{domain}/{alias}"
 
 
+def _public_meta_tags(meta: LinkMetaTags | None) -> dict[str, Any] | None:
+    """Public projection of meta tags — updated_ip/updated_at/image_meta
+    are internal bookkeeping and never ride the wire."""
+    if meta is None:
+        return None
+    return {k: getattr(meta, k, None) for k in _META_TAGS_PUBLIC_FIELDS}
+
+
 def link_snapshot(doc: UrlV2Doc) -> dict[str, Any]:
-    """The public snapshot carried by every link.* lifecycle event."""
+    """The public snapshot carried by every link.* lifecycle event.
+
+    A projection of the link DOCUMENT, never of entitlements: feature
+    fields (geo_rules, meta_tags) are null when unset, which needs no
+    flag lookup — flags gate writes, the doc already carries the truth.
+    """
     return {
         "link_id": str(doc.id),
         "alias": doc.alias,
@@ -40,6 +53,8 @@ def link_snapshot(doc: UrlV2Doc) -> dict[str, Any]:
         "block_bots": bool(doc.block_bots),
         "max_clicks": doc.max_clicks,
         "expires_at": doc.expire_after.isoformat() if doc.expire_after else None,
+        "geo_rules": doc.geo_rules or None,
+        "meta_tags": _public_meta_tags(doc.meta_tags),
         "total_clicks": doc.total_clicks,
         "created_at": doc.created_at.isoformat(),
     }
@@ -71,14 +86,21 @@ def _event_change_value(field_name: str, value: object) -> object:
     if isinstance(value, datetime):
         return value.isoformat()
     if field_name == "meta_tags":
-        raw = value.model_dump() if isinstance(value, LinkMetaTags) else dict(value)
-        return {k: raw.get(k) for k in _META_TAGS_PUBLIC_FIELDS}
+        if isinstance(value, LinkMetaTags):
+            return _public_meta_tags(value)
+        return {k: dict(value).get(k) for k in _META_TAGS_PUBLIC_FIELDS}
     return value
+
+
+# Internal field name → the public snapshot vocabulary. One resource,
+# one vocabulary: a consumer must never meet two names for one field.
+_CHANGE_KEY_PUBLIC = {"expire_after": "expires_at"}
 
 
 def event_changes(existing: UrlV2Doc, update_ops: dict) -> dict:
     """update_ops → the public ``changes`` map for link.updated. Shared by
-    the single-item and bulk producers so the wire shape cannot fork."""
+    the single-item and bulk producers so the wire shape cannot fork.
+    Keys speak the snapshot's public names, never Mongo field names."""
     changes: dict = {}
     for field_name, new_value in update_ops.items():
         if field_name == "updated_at":
@@ -90,7 +112,8 @@ def event_changes(existing: UrlV2Doc, update_ops: dict) -> dict:
             old_value = old_value is not None
             new_value = new_value is not None
             field_name = "password_protected"
-        changes[field_name] = {
+        public_name = _CHANGE_KEY_PUBLIC.get(field_name, field_name)
+        changes[public_name] = {
             "old": _event_change_value(field_name, old_value),
             "new": _event_change_value(field_name, new_value),
         }
@@ -148,6 +171,7 @@ def build_link_clicked(
             "alias": event.short_code,
             "domain": domain,
             "short_url": short_url_of(domain, event.short_code),
+            "long_url": event.url.long_url,
             "clicked_at": event.enqueued_at.isoformat(),
             "country": country,
             "city": event.cf_city,

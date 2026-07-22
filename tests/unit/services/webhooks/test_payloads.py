@@ -128,7 +128,10 @@ class TestEventChanges:
         assert "203.0.113.9" not in str(changes)
         assert "argon2" not in str(changes)
         assert changes["password_protected"] == {"old": True, "new": True}
-        assert changes["expire_after"]["new"] == "2026-08-01T00:00:00+00:00"
+        # Public vocabulary on the wire: internal expire_after surfaces as
+        # the snapshot's expires_at, never the Mongo field name.
+        assert "expire_after" not in changes
+        assert changes["expires_at"]["new"] == "2026-08-01T00:00:00+00:00"
         # old side of a model-typed field sanitizes the same way
         existing_with_meta = existing.model_copy(
             update={"meta_tags": LinkMetaTags(title="Old", updated_ip="198.51.100.7")}

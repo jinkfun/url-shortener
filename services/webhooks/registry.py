@@ -46,7 +46,9 @@ class _PayloadBase(BaseModel):
 
 
 class LinkSnapshot(_PayloadBase):
-    """The public snapshot of a link — field names track UrlResponse."""
+    """The public snapshot of a link — field names track UrlResponse.
+    Feature fields are null when unset on the DOCUMENT (no entitlement
+    lookups on the event path — flags gate writes, not payloads)."""
 
     link_id: str
     alias: str
@@ -58,6 +60,8 @@ class LinkSnapshot(_PayloadBase):
     block_bots: bool = False
     max_clicks: int | None = None
     expires_at: str | None = None
+    geo_rules: dict[str, str] | None = None
+    meta_tags: dict[str, Any] | None = None
     total_clicks: int = 0
     created_at: str
 
@@ -83,6 +87,7 @@ class LinkClickedPayload(_PayloadBase):
     os: str | None = None
     device: str | None = None
     referrer: str | None = None
+    long_url: str | None = None
     utm: dict[str, str | None] | None = None
     is_bot: bool = False
     bot_name: str | None = None
@@ -113,6 +118,8 @@ def _sample_link() -> dict[str, Any]:
         "block_bots": False,
         "max_clicks": None,
         "expires_at": None,
+        "geo_rules": None,
+        "meta_tags": None,
         "total_clicks": 4102,
         "created_at": "2026-07-01T09:00:00+00:00",
     }
@@ -183,6 +190,7 @@ EVENT_REGISTRY: dict[str, EventTypeSpec] = {
                 "alias": "summer-drop",
                 "domain": "spoo.me",
                 "short_url": "https://spoo.me/summer-drop",
+                "long_url": "https://example.com/campaign",
                 "clicked_at": "2026-07-22T14:03:10+00:00",
                 "country": "IN",
                 "city": "Mumbai",

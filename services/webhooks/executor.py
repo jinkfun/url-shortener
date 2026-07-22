@@ -205,7 +205,9 @@ class DeliveryExecutor:
         payload = dict(event.payload)
         if row.dropped_since_last:
             payload["dropped_since_last"] = row.dropped_since_last
-        body = renderer.render(event.type, event.occurred_at.isoformat(), payload)
+        body = renderer.render(
+            event.event_id, event.type, event.occurred_at.isoformat(), payload
+        )
         if len(body.encode()) > self._max_bytes:
             await self._deliveries.mark_failed(row.id, "payload_over_cap")
             return None
