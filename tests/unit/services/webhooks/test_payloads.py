@@ -89,6 +89,15 @@ class TestLinkClicked:
         validate_payload("link.clicked", event.data)
         assert "203.0.113.9" not in str(event.data)
         assert event.data["is_bot"] is False
+        assert event.data["user_agent"] == "Mozilla/5.0 (X11; Linux x86_64)"
+
+    def test_user_agent_bounded_and_stripped(self):
+        crafted = "Mozilla/5.0 \x00\x1b[31m" + "A" * 2000
+        event = build_link_clicked(_click_event(user_agent=crafted), "spoo.me")
+        assert event is not None
+        ua = event.data["user_agent"]
+        assert len(ua) <= 512
+        assert "\x00" not in ua and "\x1b" not in ua
 
     def test_bot_click_flagged_not_suppressed(self):
         event = build_link_clicked(_click_event(user_agent="curl/8.0"), "spoo.me")

@@ -197,6 +197,7 @@ EVENT_REGISTRY: dict[str, EventTypeSpec] = {
                 "browser": "Chrome",
                 "os": "Android",
                 "device": "mobile",
+                "user_agent": "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36",
                 "referrer": "https://x.com/",
                 "utm": {"source": "newsletter", "medium": "email", "campaign": None},
                 "is_bot": False,

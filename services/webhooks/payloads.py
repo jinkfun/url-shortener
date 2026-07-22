@@ -9,6 +9,7 @@ ever reach a payload.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -21,6 +22,16 @@ from services.click.bot_detection import get_bot_name, is_bot_request
 from services.click.events import ClickEvent
 from services.click.handlers import classify_device
 from services.events.contract import DomainEvent
+
+# Raw UA is visitor-controlled input — bound and strip control chars
+# before it rides the wire (same posture as ClickEvent's UTM bound).
+_UA_MAX_LEN = 512
+_UA_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _wire_user_agent(user_agent: str) -> str | None:
+    cleaned = _UA_CONTROL_CHARS_RE.sub("", user_agent).strip()[:_UA_MAX_LEN]
+    return cleaned or None
 
 
 def short_url_of(domain: str, alias: str) -> str:
@@ -178,6 +189,7 @@ def build_link_clicked(
             "browser": browser,
             "os": os_family,
             "device": device,
+            "user_agent": _wire_user_agent(event.user_agent),
             "referrer": event.referrer,
             "utm": {
                 "source": event.utm_source,
