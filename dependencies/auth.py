@@ -277,6 +277,15 @@ DOMAIN_READ_SCOPES: set[str] = {
     ApiKeyScope.DOMAINS_READ,
     ApiKeyScope.ADMIN_ALL,
 }
+WEBHOOKS_MANAGE_SCOPES: set[str] = {
+    ApiKeyScope.WEBHOOKS_MANAGE,
+    ApiKeyScope.ADMIN_ALL,
+}
+WEBHOOKS_READ_SCOPES: set[str] = {
+    ApiKeyScope.WEBHOOKS_MANAGE,
+    ApiKeyScope.WEBHOOKS_READ,
+    ApiKeyScope.ADMIN_ALL,
+}
 # Deliberately NOT satisfied by admin:all: API keys can hold admin:all but
 # must never manage keys, and app tokens declare keys:manage explicitly.
 KEYS_MANAGE_SCOPES: set[str] = {ApiKeyScope.KEYS_MANAGE}

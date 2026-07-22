@@ -39,6 +39,9 @@ from repositories.report_repository import (
 from repositories.token_repository import TokenRepository
 from repositories.url_repository import UrlRepository
 from repositories.user_repository import UserRepository
+from repositories.webhook_delivery_repository import WebhookDeliveryRepository
+from repositories.webhook_endpoint_repository import WebhookEndpointRepository
+from repositories.webhook_event_repository import WebhookEventRepository
 from schemas.enums.domain_status import VerificationMethod
 from services.api_key_service import ApiKeyService
 from services.auth.credentials import CredentialService
@@ -53,6 +56,11 @@ from services.click.sinks import InlineSink, RedisStreamSink
 from services.contact_service import ContactService
 from services.custom_domain_service import CustomDomainService
 from services.edge_cache.og_writethrough import OgEdgeWritethrough
+from services.events.sinks import (
+    InlineDomainEventSink,
+    NullDomainEventSink,
+    StreamDomainEventSink,
+)
 from services.export.formatters import default_formatters
 from services.export.service import ExportService
 from services.feature_flag_service import FeatureFlagService
@@ -69,6 +77,15 @@ from services.stats_service import StatsService
 from services.tenant_resolver import CachedMongoTenantResolver
 from services.token_factory import TokenFactory
 from services.url_service import UrlService
+from services.webhooks import (
+    DeliveryExecutor,
+    OwnerSubscriptionCache,
+    SubscriptionMatcher,
+    WebhookDispatcher,
+    WebhookService,
+)
+from services.webhooks.consumers import WebhookFanoutClickSink
+from services.webhooks.renderers import default_renderers
 
 log = get_logger(__name__)
 
@@ -196,6 +213,70 @@ def wire_services(app: FastAPI, settings: AppSettings, redis_client) -> None:
     else:
         meta_image_sink = NullMetaImageSink()
 
+    # ── Webhooks system ──────────────────────────────────────────────
+    # Built BEFORE the services so producers receive the sink at
+    # construction. Transport degrades along the opt-in ladder (TRD §5):
+    # queue Redis present → stream sink (the click worker consumes),
+    # absent → inline dispatch at emit time. The delivery executor is
+    # Mongo-only and runs embedded in this process when the runtime
+    # resolves to "embedded" (see app.py lifespan).
+    wh_settings = settings.webhooks
+    queue_redis_for_webhooks = getattr(app.state, "queue_redis", None)
+    webhook_event_repo = WebhookEventRepository(db["webhook-events"])
+    webhook_endpoint_repo = WebhookEndpointRepository(db["webhook-endpoints"])
+    webhook_delivery_repo = WebhookDeliveryRepository(db["webhook-deliveries"])
+    webhook_owner_cache = OwnerSubscriptionCache(
+        redis_client, ttl_seconds=wh_settings.matcher_cache_ttl_seconds
+    )
+    webhook_dispatcher = WebhookDispatcher(
+        SubscriptionMatcher(webhook_endpoint_repo, webhook_owner_cache),
+        webhook_event_repo,
+        webhook_delivery_repo,
+        webhook_endpoint_repo,
+        max_pending_per_endpoint=wh_settings.max_pending_per_endpoint,
+    )
+    webhook_executor = DeliveryExecutor(
+        webhook_delivery_repo,
+        webhook_endpoint_repo,
+        webhook_event_repo,
+        default_renderers(),
+        master_secret=settings.secret_key,
+        delivery_timeout=wh_settings.delivery_timeout_seconds,
+        max_payload_bytes=wh_settings.max_payload_bytes,
+        max_consecutive_failures=wh_settings.max_consecutive_failures,
+        poll_interval=wh_settings.executor_poll_seconds,
+        lease_seconds=wh_settings.executor_lease_seconds,
+    )
+    if not wh_settings.enabled:
+        app.state.domain_event_sink = NullDomainEventSink()
+    elif queue_redis_for_webhooks is not None:
+        app.state.domain_event_sink = StreamDomainEventSink(
+            queue_redis_for_webhooks,
+            fallback=InlineDomainEventSink(webhook_dispatcher),
+            maxlen=wh_settings.domain_stream_maxlen,
+        )
+        log.info("webhooks_stream_sink_enabled")
+    else:
+        app.state.domain_event_sink = InlineDomainEventSink(webhook_dispatcher)
+        log.info("webhooks_inline_sink_enabled")
+    # Embedded runtime: the executor lives in this process when webhooks
+    # are on and either explicitly requested or (auto) no worker consumes —
+    # i.e. the inline rung. app.py starts/cancels the task.
+    app.state.webhook_executor = webhook_executor
+    app.state.webhook_executor_embedded = wh_settings.enabled and (
+        wh_settings.runtime == "embedded"
+        or (wh_settings.runtime == "auto" and queue_redis_for_webhooks is None)
+    )
+    app.state.webhook_service = WebhookService(
+        webhook_endpoint_repo,
+        webhook_delivery_repo,
+        webhook_event_repo,
+        webhook_executor,
+        webhook_owner_cache,
+        master_secret=settings.secret_key,
+        max_endpoints=wh_settings.max_endpoints,
+    )
+
     # ── Services ─────────────────────────────────────────────────────────
     app.state.url_service = UrlService(
         url_repo,
@@ -217,6 +298,7 @@ def wire_services(app: FastAPI, settings: AppSettings, redis_client) -> None:
         meta_image_max_bytes=r2.upload_max_bytes,
         meta_image_sink=meta_image_sink,
         meta_key_secret=settings.secret_key,
+        events=app.state.domain_event_sink,
     )
     app.state.bulk_url_service = BulkUrlService(
         url_repo,
@@ -357,6 +439,17 @@ def wire_services(app: FastAPI, settings: AppSettings, redis_client) -> None:
         feature_flag_repo, feature_flag_cache
     )
 
+    # Inline rung also needs the click feed: wrap the inline click sink so
+    # link.clicked dispatch happens at emit time (TRD §5). Stream
+    # deployments get this from the worker's `webhooks` group instead.
+    if isinstance(app.state.domain_event_sink, InlineDomainEventSink):
+        app.state.click_sink = WebhookFanoutClickSink(
+            app.state.click_sink,
+            webhook_dispatcher,
+            app.state.geoip,
+            settings.system_default_domain,
+        )
+
     # ── Custom-domains feature ───────────────────────────────────────
     # Wired unconditionally so the data plumbing is in place even when the
     # master flag is off. Mutations short-circuit inside the service via
@@ -451,4 +544,5 @@ def wire_services(app: FastAPI, settings: AppSettings, redis_client) -> None:
         if cd_settings.cf_zone_id and not cd_settings.mock_dcv
         else None,
         url_service=app.state.url_service,
+        events=app.state.domain_event_sink,
     )

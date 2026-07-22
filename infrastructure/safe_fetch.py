@@ -228,3 +228,74 @@ async def fetch_public_image(
         max_redirects=max_redirects,
         user_agent=user_agent,
     )
+
+
+@dataclass(frozen=True)
+class PostResult:
+    """Outcome of a webhook-style POST. Status outcomes are DATA here
+    (the delivery executor owns retry policy) — only SSRF violations and
+    transport errors surface as fields, never exceptions."""
+
+    status_code: int | None
+    error: str | None
+    body_snippet: str | None  # first 256 bytes, for the delivery log
+
+
+async def post_public(
+    url: str,
+    body: str,
+    *,
+    headers: dict[str, str],
+    timeout: float = 15.0,
+    snippet_bytes: int = 256,
+) -> PostResult:
+    """POST *body* to *url* with the same SSRF guards as fetch_public.
+
+    No redirects are followed — a redirect defeats IP pinning, so it is
+    reported as an error outcome. Never raises: webhook delivery failure
+    is a recorded fact, not an exception path.
+    """
+    try:
+        parsed = httpx.URL(url)
+        if parsed.scheme != "https":
+            return PostResult(None, "non-https URL", None)
+        ip = await _resolve_public_ip(parsed.host)
+    except FetchHardError as exc:
+        return PostResult(None, str(exc), None)
+
+    pinned = parsed.copy_with(host=_bracket(ip))
+    try:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
+            request = client.build_request(
+                "POST",
+                pinned,
+                content=body.encode(),
+                headers={"Host": parsed.host, **headers},
+                extensions={"sni_hostname": parsed.host},
+            )
+            resp = await client.send(request, stream=True)
+            try:
+                if resp.status_code in _REDIRECT_STATUSES:
+                    return PostResult(resp.status_code, "redirect not followed", None)
+                try:
+                    buf = await asyncio.wait_for(
+                        _read_body(resp, snippet_bytes, True), timeout=timeout
+                    )
+                except (asyncio.TimeoutError, TimeoutError):
+                    buf = bytearray()
+                snippet = bytes(buf).decode("utf-8", errors="replace") if buf else None
+                return PostResult(resp.status_code, None, snippet)
+            finally:
+                await resp.aclose()
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
+        return PostResult(None, f"{type(exc).__name__}: {exc}", None)
+
+
+async def validate_public_https_url(url: str) -> None:
+    """Creation-time gate for user-registered outbound URLs (webhook
+    endpoints): https + all resolved addresses public. Raises
+    FetchHardError with a user-safe message otherwise."""
+    parsed = httpx.URL(url)
+    if parsed.scheme != "https":
+        raise FetchHardError("URL must be https")
+    await _resolve_public_ip(parsed.host)

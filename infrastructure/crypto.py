@@ -64,3 +64,32 @@ def pkce_s256_challenge(code_verifier: str) -> str:
     """
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def _derive_aes_key(master: str, domain: str) -> bytes:
+    """32-byte AES key from the app master secret, domain-separated so two
+    features deriving from the same master can never share a key."""
+    return hashlib.sha256(f"{domain}:{master}".encode()).digest()
+
+
+def encrypt_secret(plaintext: str, master: str, *, domain: str) -> str:
+    """AES-GCM encrypt-at-rest for secrets the server must READ BACK
+    (webhook signing secrets — the server signs, so hash-only storage is
+    impossible). Output: base64(nonce || ciphertext)."""
+    import os as _os
+
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    nonce = _os.urandom(12)
+    ct = AESGCM(_derive_aes_key(master, domain)).encrypt(
+        nonce, plaintext.encode(), None
+    )
+    return base64.b64encode(nonce + ct).decode()
+
+
+def decrypt_secret(token: str, master: str, *, domain: str) -> str:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    raw = base64.b64decode(token)
+    plain = AESGCM(_derive_aes_key(master, domain)).decrypt(raw[:12], raw[12:], None)
+    return plain.decode()

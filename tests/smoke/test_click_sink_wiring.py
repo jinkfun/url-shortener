@@ -30,6 +30,9 @@ _COLLECTIONS = (
     "blocked_domains",
     "reports",
     "report_submissions",
+    "webhook-events",
+    "webhook-endpoints",
+    "webhook-deliveries",
 )
 
 

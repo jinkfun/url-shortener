@@ -23,6 +23,8 @@ class ApiKeyScope(str, Enum):
     DOMAINS_MANAGE = "domains:manage"
     DOMAINS_READ = "domains:read"
     REPORTS_CREATE = "reports:create"
+    WEBHOOKS_MANAGE = "webhooks:manage"
+    WEBHOOKS_READ = "webhooks:read"
     # Grantable only via app registry entries (device auth). API keys must
     # never carry it — a key that can mint keys defeats revocation.
     KEYS_MANAGE = "keys:manage"

@@ -56,6 +56,7 @@ CUSTOM_DOMAINS_FLAG = "custom_domains"
 GEO_TARGETING_FLAG = "geo_targeting"
 META_TAGS_FLAG = "custom_meta_tags"
 AB_TESTING_FLAG = "ab_testing"
+WEBHOOKS_FLAG = "webhooks"
 
 # Flags whose per-user answer is exposed to clients via GET /api/v1/me/
 # features, so frontends can decide what to render. Enforcement stays on
@@ -66,6 +67,7 @@ EXPOSED_FEATURES: tuple[str, ...] = (
     GEO_TARGETING_FLAG,
     META_TAGS_FLAG,
     AB_TESTING_FLAG,
+    WEBHOOKS_FLAG,
 )
 
 

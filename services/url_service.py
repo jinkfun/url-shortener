@@ -50,8 +50,12 @@ from schemas.dto.requests.url import (
 )
 from services.edge_cache.contract import cache_key
 from services.edge_cache.og_writethrough import OgEdgeWritethrough
+from services.events.contract import DomainEvent
+from services.events.protocol import DomainEventSink
+from services.events.sinks import NullDomainEventSink
 from services.meta_tags.events import MetaImageValidateEvent
 from services.meta_tags.images import ingest_meta_image
+from services.webhooks.payloads import link_owner_id, link_snapshot
 
 if TYPE_CHECKING:
     from infrastructure.cloudflare_kv import CloudflareKVClient
@@ -403,6 +407,7 @@ class UrlService:
         meta_image_max_bytes: int = 512_000,
         meta_image_sink: MetaImageValidationSink | None = None,
         meta_key_secret: str = "",
+        events: DomainEventSink | None = None,
     ) -> None:
         self._url_repo = url_repo
         self._legacy_repo = legacy_repo
@@ -437,6 +442,9 @@ class UrlService:
         # HMAC pepper for storage-key owner prefixes (public URLs must not
         # carry raw ObjectIds). Wired from settings.secret_key.
         self._meta_key_secret = meta_key_secret
+        # Domain-event sink (webhooks backbone). Null default: producers
+        # never carry conditionals and tests need no wiring changes.
+        self._events = events or NullDomainEventSink()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -902,6 +910,8 @@ class UrlService:
         # image_meta already). Best-effort emit — sink swallows failures.
         await self._maybe_emit_image_validation(url_doc)
 
+        await self._emit_link_event("link.created", url_doc)
+
         return url_doc
 
     async def update(
@@ -1022,7 +1032,39 @@ class UrlService:
         if "meta_tags" in update_ops:
             await self._maybe_emit_image_validation(merged_doc)
 
+        await self._emit_link_event(
+            "link.updated",
+            merged_doc,
+            extra={"changes": _event_changes(existing, update_ops)},
+        )
+        if "status" in update_ops:
+            await self._emit_link_event(
+                "link.status_changed",
+                merged_doc,
+                extra={
+                    "old_status": existing.status.value,
+                    "new_status": UrlStatus(update_ops["status"]).value,
+                    "reason": None,
+                },
+            )
+
         return merged_doc
+
+    async def _emit_link_event(
+        self, event_type: str, doc: UrlV2Doc, extra: dict | None = None
+    ) -> None:
+        """Publish a link lifecycle fact to the domain-event backbone.
+
+        Anonymous links skip entirely (no possible webhook subscriber);
+        the sink never raises, so producers stay unconditional.
+        """
+        owner = link_owner_id(doc)
+        if owner is None:
+            return
+        data: dict = {"link": link_snapshot(doc)}
+        if extra:
+            data.update(extra)
+        await self._events.emit(DomainEvent(type=event_type, owner_id=owner, data=data))
 
     async def _maybe_emit_image_validation(self, doc: UrlV2Doc) -> None:
         """Queue async validation for an external https og:image."""
@@ -1143,6 +1185,7 @@ class UrlService:
             short_code=existing.alias,
             user_id=str(owner_id),
         )
+        await self._emit_link_event("link.deleted", existing)
 
     async def delete_all_by_domain(
         self,
@@ -1450,6 +1493,30 @@ class UrlService:
 
 
 # ── Module-level helpers ──────────────────────────────────────────────────────
+
+
+def _event_changes(existing: UrlV2Doc, update_ops: dict) -> dict:
+    """update_ops → the public ``changes`` map for link.updated.
+
+    Password values are structurally redacted to presence booleans —
+    hashes must never ride the event backbone (same posture as
+    ClickEvent's password strip).
+    """
+    changes: dict = {}
+    for field_name, new_value in update_ops.items():
+        if field_name == "updated_at":
+            continue
+        old_value = getattr(existing, field_name, None)
+        if field_name == "password":
+            old_value = old_value is not None
+            new_value = new_value is not None
+            field_name = "password_protected"
+        if isinstance(old_value, UrlStatus):
+            old_value = old_value.value
+        if isinstance(new_value, UrlStatus):
+            new_value = new_value.value
+        changes[field_name] = {"old": old_value, "new": new_value}
+    return changes
 
 
 def _raise_for_status(status: UrlStatus) -> None:

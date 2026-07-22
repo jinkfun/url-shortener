@@ -1,0 +1,111 @@
+"""Repository for the ``webhook-endpoints`` collection.
+
+Health counters are updated atomically here; the semantics that matter:
+``consecutive_failures`` counts EXHAUSTED deliveries (a delivery that ran
+out of retries), never individual attempts — one flaky night must not
+kill an endpoint. Success resets it and drains ``dropped_count`` (D13:
+the drained value is carried on the next delivery's envelope).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from bson import ObjectId
+
+from repositories.base import BaseRepository
+from schemas.enums.webhook import EndpointDisabledReason, WebhookStatus
+from schemas.models.webhook import WebhookEndpointDoc
+
+
+class WebhookEndpointRepository(BaseRepository[WebhookEndpointDoc]):
+    async def insert_endpoint(self, doc: WebhookEndpointDoc) -> ObjectId:
+        return await self._insert(doc.to_mongo())
+
+    async def find_by_id(self, endpoint_id: ObjectId) -> WebhookEndpointDoc | None:
+        return await self._find_one({"_id": endpoint_id})
+
+    async def find_owned(
+        self, endpoint_id: ObjectId, user_id: ObjectId
+    ) -> WebhookEndpointDoc | None:
+        return await self._find_one({"_id": endpoint_id, "user_id": user_id})
+
+    async def find_by_user(self, user_id: ObjectId) -> list[WebhookEndpointDoc]:
+        docs = await self._col.find({"user_id": user_id}).to_list(length=None)
+        return [WebhookEndpointDoc.from_mongo(d) for d in docs]
+
+    async def find_active_for_owner(
+        self, owner_id: ObjectId
+    ) -> list[WebhookEndpointDoc]:
+        docs = await self._col.find(
+            {"user_id": owner_id, "status": WebhookStatus.ACTIVE.value}
+        ).to_list(length=None)
+        return [WebhookEndpointDoc.from_mongo(d) for d in docs]
+
+    async def count_by_user(self, user_id: ObjectId) -> int:
+        return await self._count({"user_id": user_id})
+
+    async def count_active_for_owner(self, owner_id: ObjectId) -> int:
+        return await self._count(
+            {"user_id": owner_id, "status": WebhookStatus.ACTIVE.value}
+        )
+
+    async def update_fields(self, endpoint_id: ObjectId, fields: dict) -> bool:
+        fields["updated_at"] = datetime.now(timezone.utc)
+        return await self._update({"_id": endpoint_id}, {"$set": fields})
+
+    async def delete_endpoint(self, endpoint_id: ObjectId, user_id: ObjectId) -> bool:
+        return await self._delete({"_id": endpoint_id, "user_id": user_id})
+
+    # ── Health counters (executor/dispatcher side) ───────────────────────
+
+    async def record_success(self, endpoint_id: ObjectId) -> int:
+        """Reset failure streak, drain dropped_count. Returns the drained
+        dropped_count so the NEXT delivery can carry ``dropped_since_last``."""
+        now = datetime.now(timezone.utc)
+        doc = await self._col.find_one_and_update(
+            {"_id": endpoint_id},
+            {
+                "$set": {
+                    "consecutive_failures": 0,
+                    "dropped_count": 0,
+                    "last_delivery_at": now,
+                    "last_success_at": now,
+                },
+                "$inc": {"total_deliveries": 1, "total_successes": 1},
+            },
+            projection={"dropped_count": 1},
+        )
+        return int(doc.get("dropped_count", 0)) if doc else 0
+
+    async def record_exhausted(self, endpoint_id: ObjectId, reason: str) -> int:
+        """One delivery ran out of retries. Returns the new streak length."""
+        doc = await self._col.find_one_and_update(
+            {"_id": endpoint_id},
+            {
+                "$set": {
+                    "last_delivery_at": datetime.now(timezone.utc),
+                    "last_failure_reason": reason,
+                },
+                "$inc": {"total_deliveries": 1, "consecutive_failures": 1},
+            },
+            return_document=True,
+        )
+        return int(doc.get("consecutive_failures", 0)) if doc else 0
+
+    async def increment_dropped(self, endpoint_id: ObjectId) -> None:
+        await self._update({"_id": endpoint_id}, {"$inc": {"dropped_count": 1}})
+
+    async def disable(
+        self, endpoint_id: ObjectId, reason: EndpointDisabledReason
+    ) -> bool:
+        return await self._update(
+            {"_id": endpoint_id},
+            {
+                "$set": {
+                    "status": WebhookStatus.DISABLED.value,
+                    "disabled_reason": reason.value,
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            },
+        )
