@@ -1,0 +1,122 @@
+{
+  "name": "spoo · webhooks",
+  "description": "Webhook dispatch, delivery health, and endpoint lifecycle. Refresh 60s.",
+  "owner": "X-AXIOM-EVERYONE",
+  "datasets": ["spoo-prod"],
+  "refreshTime": 60,
+  "schemaVersion": 2,
+  "timeWindowStart": "qr-now-6h",
+  "timeWindowEnd": "qr-now",
+  "charts": [
+    {
+      "id": "stat-dispatched",
+      "name": "Events dispatched (6h)",
+      "type": "Statistic",
+      "query": {
+        "apl": "['spoo-prod']\n| where event == \"webhook_dispatched\"\n| summarize total = count()\n| project total"
+      }
+    },
+    {
+      "id": "stat-delivered",
+      "name": "Deliveries succeeded (6h)",
+      "type": "Statistic",
+      "query": {
+        "apl": "['spoo-prod']\n| where event == \"webhook_delivered\" and is_test != true\n| summarize total = count()\n| project total"
+      }
+    },
+    {
+      "id": "stat-delivery-success-rate",
+      "name": "Delivery success rate %",
+      "type": "Statistic",
+      "query": {
+        "apl": "['spoo-prod']\n| where event in (\"webhook_delivered\", \"webhook_delivery_attempt_failed\")\n| summarize total = count(), ok = countif(event == \"webhook_delivered\")\n| project rate = round(100.0 * ok / total, 2)"
+      }
+    },
+    {
+      "id": "stat-p95-delivery",
+      "name": "p95 delivery (ms)",
+      "type": "Statistic",
+      "query": {
+        "apl": "['spoo-prod']\n| where event == \"webhook_delivered\"\n| summarize p95 = percentile(duration_ms, 95)\n| project p95"
+      }
+    },
+    {
+      "id": "ts-dispatch-by-type",
+      "name": "Dispatched by event type",
+      "type": "TimeSeries",
+      "query": {
+        "apl": "['spoo-prod']\n| where event == \"webhook_dispatched\"\n| summarize count() by bin_auto(_time), event_type"
+      }
+    },
+    {
+      "id": "ts-delivery-outcomes",
+      "name": "Delivery attempts: ok vs failed",
+      "type": "TimeSeries",
+      "query": {
+        "apl": "['spoo-prod']\n| where event in (\"webhook_delivered\", \"webhook_delivery_attempt_failed\")\n| summarize count() by bin_auto(_time), event"
+      }
+    },
+    {
+      "id": "ts-attempt-failures-by-status",
+      "name": "Failed attempts by status code",
+      "type": "TimeSeries",
+      "query": {
+        "apl": "['spoo-prod']\n| where event == \"webhook_delivery_attempt_failed\"\n| extend code = coalesce(tostring(status_code), \"transport\")\n| summarize count() by bin_auto(_time), code"
+      }
+    },
+    {
+      "id": "ts-endpoints-disabled",
+      "name": "Endpoints auto-disabled (ALERT SIGNAL)",
+      "type": "TimeSeries",
+      "query": {
+        "apl": "['spoo-prod']\n| where event == \"webhook_endpoint_disabled\"\n| summarize count() by bin_auto(_time), reason"
+      }
+    },
+    {
+      "id": "ts-drops-over-cap",
+      "name": "Deliveries dropped over pending cap",
+      "type": "TimeSeries",
+      "query": {
+        "apl": "['spoo-prod']\n| where event == \"webhook_delivery_dropped_over_cap\"\n| summarize count() by bin_auto(_time), event_type"
+      }
+    },
+    {
+      "id": "ts-pipeline-degradation",
+      "name": "Pipeline degradation (sink fallback / executor errors)",
+      "type": "TimeSeries",
+      "query": {
+        "apl": "['spoo-prod']\n| where event in (\"domain_event_sink_fallback\", \"webhook_executor_tick_failed\", \"domain_event_inline_dispatch_failed\", \"webhook_click_fanout_failed\")\n| summarize count() by bin_auto(_time), event"
+      }
+    },
+    {
+      "id": "table-slowest-endpoints",
+      "name": "Slowest endpoints (p95 ms)",
+      "type": "Table",
+      "query": {
+        "apl": "['spoo-prod']\n| where event == \"webhook_delivered\"\n| summarize p95 = percentile(duration_ms, 95), deliveries = count() by endpoint_id\n| sort by p95 desc\n| take 10"
+      }
+    },
+    {
+      "id": "table-failing-endpoints",
+      "name": "Failing endpoints (attempts)",
+      "type": "Table",
+      "query": {
+        "apl": "['spoo-prod']\n| where event == \"webhook_delivery_attempt_failed\"\n| summarize failures = count(), last_error = arg_max(_time, error) by endpoint_id\n| sort by failures desc\n| take 10"
+      }
+    }
+  ],
+  "layout": [
+    { "i": "stat-dispatched", "x": 0, "y": 0, "w": 3, "h": 2 },
+    { "i": "stat-delivered", "x": 3, "y": 0, "w": 3, "h": 2 },
+    { "i": "stat-delivery-success-rate", "x": 6, "y": 0, "w": 3, "h": 2 },
+    { "i": "stat-p95-delivery", "x": 9, "y": 0, "w": 3, "h": 2 },
+    { "i": "ts-dispatch-by-type", "x": 0, "y": 2, "w": 6, "h": 4 },
+    { "i": "ts-delivery-outcomes", "x": 6, "y": 2, "w": 6, "h": 4 },
+    { "i": "ts-attempt-failures-by-status", "x": 0, "y": 6, "w": 6, "h": 4 },
+    { "i": "ts-endpoints-disabled", "x": 6, "y": 6, "w": 6, "h": 4 },
+    { "i": "ts-drops-over-cap", "x": 0, "y": 10, "w": 6, "h": 4 },
+    { "i": "ts-pipeline-degradation", "x": 6, "y": 10, "w": 6, "h": 4 },
+    { "i": "table-slowest-endpoints", "x": 0, "y": 14, "w": 6, "h": 4 },
+    { "i": "table-failing-endpoints", "x": 6, "y": 14, "w": 6, "h": 4 }
+  ]
+}

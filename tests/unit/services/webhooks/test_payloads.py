@@ -1,0 +1,96 @@
+"""Payload builders — internal facts → public payloads, privacy guarantees."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from bson import ObjectId
+
+from infrastructure.cache.url_cache import UrlCacheData
+from schemas.models.base import ANONYMOUS_OWNER_ID
+from schemas.models.url import UrlV2Doc
+from services.click.events import ClickEvent
+from services.webhooks.payloads import (
+    build_link_clicked,
+    build_link_expired,
+    link_snapshot,
+)
+from services.webhooks.registry import validate_payload
+
+_OWNER = ObjectId()
+
+
+def _doc(owner_id: ObjectId = _OWNER) -> UrlV2Doc:
+    doc = UrlV2Doc(
+        alias="drop",
+        owner_id=owner_id,
+        domain="spoo.me",
+        created_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        long_url="https://example.com/x",
+        password="argon2-hash-material",
+        max_clicks=100,
+        total_clicks=100,
+    )
+    doc.id = ObjectId()
+    return doc
+
+
+def _click_event(user_agent: str = "Mozilla/5.0 (X11; Linux x86_64)") -> ClickEvent:
+    return ClickEvent(
+        short_code="drop",
+        schema_key="v2",
+        is_emoji=False,
+        url=UrlCacheData(
+            _id=str(ObjectId()),
+            alias="drop",
+            long_url="https://example.com/x",
+            block_bots=False,
+            password_hash=None,
+            expiration_time=None,
+            max_clicks=None,
+            url_status="ACTIVE",
+            schema_version="v2",
+            owner_id=str(_OWNER),
+            domain="spoo.me",
+        ),
+        client_ip="203.0.113.9",
+        user_agent=user_agent,
+        referrer=None,
+        cf_city=None,
+        redirect_ms=4,
+    )
+
+
+class TestLinkSnapshot:
+    def test_password_becomes_presence_boolean(self):
+        snap = link_snapshot(_doc())
+        assert snap["password_protected"] is True
+        assert "password" not in snap
+        assert "argon2" not in str(snap)
+
+
+class TestLinkExpired:
+    def test_anonymous_owner_returns_none(self):
+        assert build_link_expired(_doc(owner_id=ANONYMOUS_OWNER_ID), "x") is None
+
+    def test_owned_link_builds_valid_payload(self):
+        event = build_link_expired(_doc(), "max_clicks_reached")
+        assert event is not None
+        assert event.type == "link.expired"
+        assert event.owner_id == str(_OWNER)
+        assert event.data["reason"] == "max_clicks_reached"
+        validate_payload("link.expired", event.data)
+
+
+class TestLinkClicked:
+    def test_builds_valid_payload_with_no_ip(self):
+        event = build_link_clicked(_click_event(), "spoo.me")
+        assert event is not None
+        validate_payload("link.clicked", event.data)
+        assert "203.0.113.9" not in str(event.data)
+        assert event.data["is_bot"] is False
+
+    def test_bot_click_flagged_not_suppressed(self):
+        event = build_link_clicked(_click_event(user_agent="curl/8.0"), "spoo.me")
+        assert event is not None
+        assert event.data["is_bot"] is True

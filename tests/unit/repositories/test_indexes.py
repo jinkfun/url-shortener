@@ -64,7 +64,7 @@ class TestEnsureIndexes:
             [("domain", 1), ("alias", 1)], unique=True
         )
         urls_v2_col.drop_index.assert_any_await("alias_1")
-        # Webhooks: the claim index and the coupled TTL pair (TRD §11.4).
+        # Webhooks: the claim index and the coupled TTL pair.
         webhook_deliveries_col.create_index.assert_any_await(
             [("status", 1), ("next_attempt_at", 1)], name="ix_claim"
         )

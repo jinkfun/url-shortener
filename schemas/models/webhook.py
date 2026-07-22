@@ -1,8 +1,8 @@
 """Webhook document models.
 
-Three collections (TRD §11):
+Three collections:
 - ``webhook-endpoints``  — subscriptions + signing material + health
-- ``webhook-events``     — the fact, stored ONCE per occurrence (D14)
+- ``webhook-events``     — the fact, stored ONCE per occurrence
 - ``webhook-deliveries`` — thin per-endpoint delivery state referencing the event
 
 The ``whsec_…`` signing secret is shown once at creation and stored
@@ -62,7 +62,7 @@ class WebhookEndpointDoc(MongoBaseModel):
     # Health (denormalized; counters updated atomically by the repository).
     # consecutive_failures counts EXHAUSTED deliveries, not attempts.
     consecutive_failures: int = 0
-    dropped_count: int = 0  # D13 pending-cap drops since last successful delivery
+    dropped_count: int = 0  # pending-cap drops since last successful delivery
     total_deliveries: int = 0
     total_successes: int = 0
     last_delivery_at: datetime | None = None
@@ -75,7 +75,7 @@ class WebhookEndpointDoc(MongoBaseModel):
 
 class WebhookEventDoc(MongoBaseModel):
     """Document model for the ``webhook-events`` collection — one row per
-    fact regardless of fan-out (D14). TTL-bounded (§11.4)."""
+    fact regardless of fan-out — deliveries reference it. TTL-bounded."""
 
     event_id: str  # evt_…
     type: str
@@ -101,7 +101,7 @@ class WebhookDeliveryDoc(MongoBaseModel):
     """Document model for the ``webhook-deliveries`` collection.
 
     Thin per-endpoint state: payload lives on the event row; the rendered
-    body is set at FIRST attempt (D15) and frozen across retries so
+    body is set at FIRST attempt and frozen across retries so
     consumers can dedup on ``webhook_id`` against identical bytes."""
 
     endpoint_id: PyObjectId

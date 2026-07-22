@@ -2,9 +2,10 @@
 
 Runs on the consumer ack path (stream mode) or at emit time (inline
 mode), so its cost must be bounded and payload-size-independent: one
-matcher pass, one event insert, N thin delivery rows (D14/D15). The
+matcher pass, one event insert, N thin delivery rows. The
 caller acks the stream message AFTER dispatch returns — delivery intent
-recorded durably is the ack condition, not delivery success (TRD §3).
+recorded durably is the ack condition, not delivery success — a
+multi-hour retry ladder cannot hold a stream entry pending.
 """
 
 from __future__ import annotations
@@ -72,7 +73,7 @@ class WebhookDispatcher:
         event_oid = await self._event_repo.insert_event(event)
         rows: list[dict] = []
         for endpoint in endpoints:
-            # D13: the pending cap protects the queue itself. A subscriber
+            # The pending cap protects the queue itself. A subscriber
             # who can't drink max_pending deliveries has already lost the
             # facts — counting beats pretending.
             if (

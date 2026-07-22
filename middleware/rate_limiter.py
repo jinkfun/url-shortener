@@ -133,7 +133,7 @@ class Limits:
     REPORTS_AUTHED = "30 per minute; 500 per day"
     REPORTS_ANON = "5 per minute; 40 per day"
 
-    # Webhooks (TRD §16). Creates are tight (each one is an outbound-call
+    # Webhooks. Creates are tight (each one is an outbound-call
     # authorization); test sends bounded because each is a real signed POST
     # from our servers; the catalog is public documentation-as-API.
     WEBHOOK_CREATE = "10 per hour"

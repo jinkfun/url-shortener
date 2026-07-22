@@ -22,10 +22,8 @@ EXPECTED_EVENTS = {
     "link.status_changed",
     "link.clicked",
     "link.expired",
-    "bot.detected",
     "domain.verified",
     "domain.suspended",
-    "key.created",
 }
 
 

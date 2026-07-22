@@ -3,7 +3,7 @@
 Owns the executor's claim semantics: ``claim_due`` is an atomic
 ``find_one_and_update`` (claim = lease via ``claimed_until``), which is
 what makes N concurrent executors safe with no scheduler infrastructure
-beyond Mongo itself (TRD §14). The claim query is stateless over
+beyond Mongo itself. The claim query is stateless over
 ``next_attempt_at``, so process restarts self-heal on the first loop.
 """
 
@@ -87,7 +87,7 @@ class WebhookDeliveryRepository(BaseRepository[WebhookDeliveryDoc]):
         return WebhookDeliveryDoc.from_mongo(doc)
 
     async def set_rendered_body(self, delivery_id: ObjectId, body: str) -> None:
-        """First attempt only — the body is frozen across retries (D15)."""
+        """First attempt only — the body is frozen across retries."""
         await self._update(
             {"_id": delivery_id, "rendered_body": None},
             {"$set": {"rendered_body": body}},

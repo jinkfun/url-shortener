@@ -70,6 +70,7 @@ from services.click.consumers.hotness import HotUrlAction
 from services.edge_cache import PromoteToEdgeCacheAction
 from services.edge_cache.og_writethrough import OgEdgeWritethrough
 from services.events.contract import DOMAIN_EVENTS_STREAM
+from services.events.sinks import InlineDomainEventSink
 from services.meta_tags.validator import MetaImageValidator
 from services.webhooks import (
     DeliveryExecutor,
@@ -158,6 +159,53 @@ async def _build_runtime(
         counter_redis=None,
     )
 
+    # Built FIRST so the stats consumer can carry the sink (link.expired
+    # fires from its max-clicks branch). In-process dispatch — same process
+    # as the dispatcher, no re-queue round trip.
+    worker_domain_sink = None
+    if run_webhooks:
+        # Webhooks stack: dispatcher fed by two consumer-group
+        # feeds (clicks + domain events), executor as a background task —
+        # Mongo-only, so it shares this process without extra infra.
+        wh = settings.webhooks
+        webhook_event_repo = WebhookEventRepository(db["webhook-events"])
+        webhook_endpoint_repo = WebhookEndpointRepository(db["webhook-endpoints"])
+        webhook_delivery_repo = WebhookDeliveryRepository(db["webhook-deliveries"])
+        dispatcher = WebhookDispatcher(
+            SubscriptionMatcher(
+                webhook_endpoint_repo,
+                OwnerSubscriptionCache(
+                    cache_redis, ttl_seconds=wh.matcher_cache_ttl_seconds
+                ),
+            ),
+            webhook_event_repo,
+            webhook_delivery_repo,
+            webhook_endpoint_repo,
+            max_pending_per_endpoint=wh.max_pending_per_endpoint,
+        )
+        worker_domain_sink = InlineDomainEventSink(dispatcher)
+        webhook_geoip = GeoIPService(settings.geoip_country_db, settings.geoip_city_db)
+        runtime.consumers["webhooks"] = WebhookClickConsumer(
+            dispatcher, webhook_geoip, settings.system_default_domain
+        )
+        runtime.webhook_domain_consumer = WebhookDomainConsumer(dispatcher)
+        executor = DeliveryExecutor(
+            webhook_delivery_repo,
+            webhook_endpoint_repo,
+            webhook_event_repo,
+            default_renderers(),
+            master_secret=settings.secret_key,
+            delivery_timeout=wh.delivery_timeout_seconds,
+            max_payload_bytes=wh.max_payload_bytes,
+            max_consecutive_failures=wh.max_consecutive_failures,
+            poll_interval=wh.executor_poll_seconds,
+            lease_seconds=wh.executor_lease_seconds,
+        )
+        runtime.telemetry_tasks.append(
+            asyncio.create_task(executor.run(), name="webhook-delivery-executor")
+        )
+        log.info("webhooks_worker_registered", stream=DOMAIN_EVENTS_STREAM)
+
     if "stats" in groups:
         geoip = GeoIPService(settings.geoip_country_db, settings.geoip_city_db)
         url_cache = UrlCache(cache_redis, ttl_seconds=settings.redis.redis_ttl_seconds)
@@ -169,6 +217,7 @@ async def _build_runtime(
                 EmojiUrlRepository(db["emojis"]),
                 geoip,
                 url_cache,
+                events=worker_domain_sink,
             )
         )
 
@@ -262,48 +311,6 @@ async def _build_runtime(
         )
         log.info("meta_image_validator_registered", stream=mt.stream)
 
-    if run_webhooks:
-        # Webhooks stack (TRD §13-14): dispatcher fed by two consumer-group
-        # feeds (clicks + domain events), executor as a background task —
-        # Mongo-only, so it shares this process without extra infra.
-        wh = settings.webhooks
-        webhook_event_repo = WebhookEventRepository(db["webhook-events"])
-        webhook_endpoint_repo = WebhookEndpointRepository(db["webhook-endpoints"])
-        webhook_delivery_repo = WebhookDeliveryRepository(db["webhook-deliveries"])
-        dispatcher = WebhookDispatcher(
-            SubscriptionMatcher(
-                webhook_endpoint_repo,
-                OwnerSubscriptionCache(
-                    cache_redis, ttl_seconds=wh.matcher_cache_ttl_seconds
-                ),
-            ),
-            webhook_event_repo,
-            webhook_delivery_repo,
-            webhook_endpoint_repo,
-            max_pending_per_endpoint=wh.max_pending_per_endpoint,
-        )
-        geoip = GeoIPService(settings.geoip_country_db, settings.geoip_city_db)
-        runtime.consumers["webhooks"] = WebhookClickConsumer(
-            dispatcher, geoip, settings.system_default_domain
-        )
-        runtime.webhook_domain_consumer = WebhookDomainConsumer(dispatcher)
-        executor = DeliveryExecutor(
-            webhook_delivery_repo,
-            webhook_endpoint_repo,
-            webhook_event_repo,
-            default_renderers(),
-            master_secret=settings.secret_key,
-            delivery_timeout=wh.delivery_timeout_seconds,
-            max_payload_bytes=wh.max_payload_bytes,
-            max_consecutive_failures=wh.max_consecutive_failures,
-            poll_interval=wh.executor_poll_seconds,
-            lease_seconds=wh.executor_lease_seconds,
-        )
-        runtime.telemetry_tasks.append(
-            asyncio.create_task(executor.run(), name="webhook-delivery-executor")
-        )
-        log.info("webhooks_worker_registered", stream=DOMAIN_EVENTS_STREAM)
-
     # Telemetry: periodic backlog/lag stats (the Axiom alert signal) and
     # cleanup of restart-leftover consumer names. Best-effort — a missing
     # telemetry connection never blocks consumption.
@@ -312,16 +319,21 @@ async def _build_runtime(
     )
     if telemetry_redis is not None:
         runtime.telemetry_redis = telemetry_redis
-        runtime.telemetry_tasks = [
-            asyncio.create_task(
-                StreamMetricsReporter(
-                    telemetry_redis, ce.stream, ce.stats_interval_seconds
-                ).run_forever()
-            ),
-            asyncio.create_task(
-                StaleConsumerJanitor(telemetry_redis, ce.stream).run_forever()
-            ),
-        ]
+        # extend, never assign — the webhooks executor task is already in
+        # this list and an assignment would orphan it (uncancellable at
+        # shutdown).
+        runtime.telemetry_tasks.extend(
+            [
+                asyncio.create_task(
+                    StreamMetricsReporter(
+                        telemetry_redis, ce.stream, ce.stats_interval_seconds
+                    ).run_forever()
+                ),
+                asyncio.create_task(
+                    StaleConsumerJanitor(telemetry_redis, ce.stream).run_forever()
+                ),
+            ]
+        )
 
     return runtime
 

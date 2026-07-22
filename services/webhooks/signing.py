@@ -5,7 +5,7 @@ Signature: ``v1,`` + base64(HMAC-SHA256(secret, "{msg_id}.{timestamp}.{body}")).
 
 The secret is ``whsec_`` + base64(24 random bytes); stored hash-only
 (SHA-256), shown once at creation. The BODY is frozen across retries
-(D15) but the timestamp — and therefore the signature — is fresh per
+but the timestamp — and therefore the signature — is fresh per
 attempt: replay protection requires it.
 """
 

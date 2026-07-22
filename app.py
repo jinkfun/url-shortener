@@ -195,7 +195,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                     detail="JWT_SECRET is shorter than 32 characters — consider using RS256 keys or a longer secret.",
                 )
 
-        # Embedded webhook delivery executor (TRD §5): the Mongo-only claim
+        # Embedded webhook delivery executor: the Mongo-only claim
         # loop runs here when no worker consumes — inline-rung deployments
         # keep retries/auto-disable without any extra process.
         webhook_executor_task: asyncio.Task | None = None

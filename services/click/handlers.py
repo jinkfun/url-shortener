@@ -27,6 +27,7 @@ from schemas.models.base import ANONYMOUS_OWNER_ID
 from schemas.models.click import ClickDoc, ClickMeta
 from services.click.bot_detection import get_bot_name, is_bot_request
 from services.click.protocol import ClickContext
+from services.events.protocol import DomainEventSink
 
 log = get_logger(__name__)
 
@@ -76,11 +77,14 @@ class V2ClickHandler:
         url_repo: UrlRepository,
         geoip: GeoIPService,
         url_cache: UrlCache,
+        events: DomainEventSink | None = None,
     ) -> None:
         self._click_repo = click_repo
         self._url_repo = url_repo
         self._geoip = geoip
         self._url_cache = url_cache
+        # Domain-event sink (webhooks backbone); None = feature off.
+        self._events = events
 
     async def handle(self, context: ClickContext) -> None:
         """
@@ -215,6 +219,23 @@ class V2ClickHandler:
                     max_clicks=url_data.max_clicks,
                 )
                 await self._url_cache.invalidate(short_code, url_data.domain)
+                await self._emit_expired(url_id)
+
+    async def _emit_expired(self, url_id: ObjectId) -> None:
+        """link.expired at discovery — the atomic expire above gates this
+        to once per link. Fetches the doc (rare branch) for the snapshot."""
+        if self._events is None:
+            return
+        # Function-local import: webhooks.payloads imports classify_device
+        # from this module, so a top-level import would be a cycle.
+        from services.webhooks.payloads import build_link_expired
+
+        doc = await self._url_repo.find_by_id(url_id)
+        if doc is None:
+            return
+        event = build_link_expired(doc, "max_clicks_reached")
+        if event is not None:
+            await self._events.emit(event)
 
 
 class LegacyClickHandler:

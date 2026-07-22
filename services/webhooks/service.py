@@ -3,7 +3,7 @@
 Owns the WHY: quota, URL safety at registration, pattern validation,
 secret lifecycle (generated here, shown once, stored encrypted), and
 owner-cache invalidation on every mutation. The flag gate lives at the
-route layer (write-side only, TRD §8); dispatch never sees this class.
+route layer (write-side only); dispatch never sees this class.
 """
 
 from __future__ import annotations

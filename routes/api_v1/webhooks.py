@@ -9,7 +9,7 @@ POST   /api/v1/webhooks/{id}/test                        — send a sample event
 GET    /api/v1/webhooks/{id}/deliveries                  — delivery log
 POST   /api/v1/webhooks/{id}/deliveries/{delivery_id}/retry — manual redelivery
 
-Gating (TRD §8): the `webhooks` feature flag is enforced on CREATE only —
+Gating: the `webhooks` feature flag is enforced on CREATE only —
 write-side gating; a user who loses the flag keeps managing (and pausing)
 what they already have, and stopping their deliveries is an explicit admin
 action. Flag failure is an honest 403, never a 404: the catalog endpoint

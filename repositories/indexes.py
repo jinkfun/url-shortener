@@ -148,7 +148,7 @@ async def ensure_indexes(
     # ── webhooks ───────────────────────────────────────────────────────
     # webhook-events: the fact stored once (deliveries reference it).
     # Both TTLs ride the same value so a delivery can never outlive its
-    # event (TRD §11.4) — changing WEBHOOKS_DELIVERY_LOG_TTL_DAYS requires
+    # event — changing WEBHOOKS_DELIVERY_LOG_TTL_DAYS requires
     # the drop-recreate below because Mongo rejects expireAfterSeconds
     # changes on an existing TTL index.
     webhook_events_col = db["webhook-events"]

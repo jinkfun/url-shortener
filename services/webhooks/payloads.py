@@ -51,6 +51,20 @@ def link_owner_id(doc: UrlV2Doc) -> str | None:
     return str(doc.owner_id)
 
 
+def build_link_expired(doc: UrlV2Doc, reason: str) -> DomainEvent | None:
+    """link.expired fires at DISCOVERY time: the max-clicks branch of the
+    click handler, or the redirect path's lazy time-expiry flip. Both are
+    once-per-link (atomic conditional updates gate the emit)."""
+    owner = link_owner_id(doc)
+    if owner is None:
+        return None
+    return DomainEvent(
+        type="link.expired",
+        owner_id=owner,
+        data={"link": link_snapshot(doc), "reason": reason},
+    )
+
+
 def build_link_clicked(
     event: ClickEvent,
     system_default_domain: str,

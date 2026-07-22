@@ -157,7 +157,7 @@ class TestDispatcher:
         assert len(rows) == 2
         # webhook_ids minted per (event x endpoint) and unique
         assert rows[0]["webhook_id"] != rows[1]["webhook_id"]
-        # thin rows: no payload, no rendered body at dispatch (D14/D15)
+        # thin rows: no payload, no rendered body at dispatch
         assert "payload" not in rows[0]
         assert rows[0]["rendered_body"] is None
 

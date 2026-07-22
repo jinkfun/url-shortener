@@ -1,6 +1,6 @@
 """Repository for the ``webhook-events`` collection — the fact, stored once.
 
-One row per occurrence regardless of fan-out (TRD D14). TTL-bounded via
+One row per occurrence regardless of fan-out. TTL-bounded via
 the ``created_at`` index; deliveries reference rows here by ``_id``.
 """
 

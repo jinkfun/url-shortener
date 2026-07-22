@@ -1,6 +1,6 @@
 """DeliveryExecutor — the Mongo claim loop that actually delivers.
 
-Mongo-only by design (TRD D2): claim → render (first attempt only) →
+Mongo-only by design: claim → render (first attempt only) →
 sign → POST → record. No Redis anywhere in the retry path, which is what
 lets the same class run in the click worker (prod) or embedded in the
 app lifespan (self-host rungs). Atomic claims with a lease make N
@@ -136,7 +136,27 @@ class DeliveryExecutor:
                 row.id, attempt, DeliveryStatus.SUCCESS
             )
             await self._endpoints.record_success(endpoint.id)
+            log.info(
+                "webhook_delivered",
+                endpoint_id=str(endpoint.id),
+                event_type=row.event_type,
+                webhook_id=row.webhook_id,
+                status_code=result.status_code,
+                duration_ms=duration_ms,
+                attempt=row.attempt_count + 1,
+                is_test=row.is_test,
+            )
             return
+        log.warning(
+            "webhook_delivery_attempt_failed",
+            endpoint_id=str(endpoint.id),
+            event_type=row.event_type,
+            webhook_id=row.webhook_id,
+            status_code=result.status_code,
+            error=result.error,
+            duration_ms=duration_ms,
+            attempt=row.attempt_count + 1,
+        )
 
         if result.status_code == 410:
             await self._deliveries.record_attempt_and_finish(

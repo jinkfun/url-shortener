@@ -11,8 +11,10 @@ Catalog governance (the forever-contract rules):
 - Per-field events are never minted unless the reaction class differs
   (``link.status_changed`` exists; ``link.password_changed`` never will).
 - ``link.clicked`` fires for every TRACKED click including bots (``is_bot``
-  rides the payload); ``bot.detected`` fires only for BLOCKED bots (which
-  produce no click) — one visit never fires both.
+  rides the payload). Blocked bots on ``block_bots`` links produce no click
+  and therefore no event — deliberate: a dedicated ``bot.detected`` event
+  was considered and cut (the payload flag covers the tracked case, and
+  blocked-bot noise isn't worth a forever-contract).
 """
 
 from __future__ import annotations
@@ -95,27 +97,11 @@ class LinkExpiredPayload(_PayloadBase):
     reason: str  # "max_clicks_reached" | "time_expired"
 
 
-class BotDetectedPayload(_PayloadBase):
-    link_id: str
-    alias: str
-    domain: str
-    bot_name: str | None = None
-    country: str | None = None
-    blocked: bool = True
-
-
 class DomainLifecyclePayload(_PayloadBase):
     domain_id: str
     fqdn: str
     status: str
     reason: str | None = None
-
-
-class KeyCreatedPayload(_PayloadBase):
-    key_id: str
-    name: str
-    prefix: str
-    scopes: list[str] = []
 
 
 class WebhookTestPayload(_PayloadBase):
@@ -148,7 +134,7 @@ def _sample_link() -> dict[str, Any]:
 @dataclass(frozen=True)
 class EventTypeSpec:
     name: str
-    category: str  # "link" | "domain" | "key"
+    category: str  # "link" | "domain"
     description: str
     frequency: str  # "high" | "low"
     payload_model: type[BaseModel]
@@ -250,24 +236,6 @@ EVENT_REGISTRY: dict[str, EventTypeSpec] = {
             },
         ),
         EventTypeSpec(
-            name="bot.detected",
-            category="link",
-            description=(
-                "A bot was blocked from a bot-protected link (blocked bots "
-                "produce no click event)."
-            ),
-            frequency="low",
-            payload_model=BotDetectedPayload,
-            sample=lambda: {
-                "link_id": _SAMPLE_LINK_ID,
-                "alias": "summer-drop",
-                "domain": "spoo.me",
-                "bot_name": "curl",
-                "country": "US",
-                "blocked": True,
-            },
-        ),
-        EventTypeSpec(
             name="domain.verified",
             category="domain",
             description="A custom domain finished verification and is active.",
@@ -291,21 +259,6 @@ EVENT_REGISTRY: dict[str, EventTypeSpec] = {
                 "fqdn": "go.example.com",
                 "status": "suspended",
                 "reason": "dns_verification_failed",
-            },
-        ),
-        EventTypeSpec(
-            name="key.created",
-            category="key",
-            description=(
-                "An API key was created on your account (security audit signal)."
-            ),
-            frequency="low",
-            payload_model=KeyCreatedPayload,
-            sample=lambda: {
-                "key_id": "667f1f77bcf86cd799439011",
-                "name": "ci-deploys",
-                "prefix": "spoo_ab12",
-                "scopes": ["shorten:create"],
             },
         ),
     )

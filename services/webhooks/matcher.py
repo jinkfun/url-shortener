@@ -4,7 +4,7 @@ Stateless predicates over the single event in hand; anything needing
 memory is the alerts engine's job, enforced by this class having no
 storage access beyond the endpoints query.
 
-The owner cache (D16) exists for one reason: at click rate the common
+The owner cache exists for one reason: at click rate the common
 case is "this owner has no webhooks", and that answer must come from
 Redis, not Mongo. Write-through invalidation from WebhookService on
 every endpoint mutation; degrades to per-event queries without Redis —

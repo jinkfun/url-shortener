@@ -97,16 +97,18 @@ def build_click_service(
     emoji_repo: EmojiUrlRepository,
     geoip,
     url_cache: UrlCache,
+    events=None,
 ) -> ClickService:
     """Compose the click pipeline (schema handler registry).
 
     Single source of truth for the schema→handler mapping, shared by the
     web app (inline sink) and the click worker (stats consumer) so both
-    processes always run identical tracking logic.
+    processes always run identical tracking logic. ``events`` is the
+    domain-event sink for link.expired (max-clicks branch); None = off.
     """
     return ClickService(
         {
-            "v2": V2ClickHandler(click_repo, url_repo, geoip, url_cache),
+            "v2": V2ClickHandler(click_repo, url_repo, geoip, url_cache, events=events),
             "v1": LegacyClickHandler(legacy_repo, emoji_repo, geoip),
         }
     )
@@ -215,7 +217,7 @@ def wire_services(app: FastAPI, settings: AppSettings, redis_client) -> None:
 
     # ── Webhooks system ──────────────────────────────────────────────
     # Built BEFORE the services so producers receive the sink at
-    # construction. Transport degrades along the opt-in ladder (TRD §5):
+    # construction. Transport degrades with available infrastructure:
     # queue Redis present → stream sink (the click worker consumes),
     # absent → inline dispatch at emit time. The delivery executor is
     # Mongo-only and runs embedded in this process when the runtime
@@ -401,7 +403,13 @@ def wire_services(app: FastAPI, settings: AppSettings, redis_client) -> None:
     )
 
     app.state.click_service = build_click_service(
-        click_repo, url_repo, legacy_repo, emoji_repo, app.state.geoip, url_cache
+        click_repo,
+        url_repo,
+        legacy_repo,
+        emoji_repo,
+        app.state.geoip,
+        url_cache,
+        events=app.state.domain_event_sink,
     )
 
     # ── Click event sink ─────────────────────────────────────────────
@@ -440,7 +448,7 @@ def wire_services(app: FastAPI, settings: AppSettings, redis_client) -> None:
     )
 
     # Inline rung also needs the click feed: wrap the inline click sink so
-    # link.clicked dispatch happens at emit time (TRD §5). Stream
+    # link.clicked dispatch happens at emit time. Stream
     # deployments get this from the worker's `webhooks` group instead.
     if isinstance(app.state.domain_event_sink, InlineDomainEventSink):
         app.state.click_sink = WebhookFanoutClickSink(

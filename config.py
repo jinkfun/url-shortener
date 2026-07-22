@@ -402,7 +402,7 @@ class MetaTagsSettings(BaseSettings):
 
 
 class WebhookSettings(BaseSettings):
-    """Webhooks system (TRD: thoughts/webhooks-system-trd.md).
+    """Webhooks system — real-time event deliveries to subscriber URLs.
 
     Fully opt-in: ``enabled=False`` wires the NullSink and mounts nothing.
     Fact transport rides the click pipeline's queue Redis when present and
@@ -431,12 +431,12 @@ class WebhookSettings(BaseSettings):
     # Governs BOTH webhook-events and webhook-deliveries TTL indexes — a
     # delivery must never outlive its event.
     delivery_log_ttl_days: int = Field(default=30, ge=1)
-    # D13: dispatch-side pending cap per endpoint; beyond it deliveries are
+    # Dispatch-side pending cap per endpoint; beyond it deliveries are
     # dropped-and-counted (surfaced as dropped_since_last).
     max_pending_per_endpoint: int = Field(default=1000, ge=10)
     executor_poll_seconds: float = Field(default=1.0, gt=0)
     executor_lease_seconds: int = Field(default=60, ge=10)
-    # D16: owner→subscription-count cache in front of the matcher.
+    # Owner→subscription-count cache in front of the matcher.
     matcher_cache_ttl_seconds: int = Field(default=60, ge=5)
     domain_stream_maxlen: int = Field(default=100_000, ge=1000)
 

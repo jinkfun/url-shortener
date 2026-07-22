@@ -3,8 +3,8 @@
 Health counters are updated atomically here; the semantics that matter:
 ``consecutive_failures`` counts EXHAUSTED deliveries (a delivery that ran
 out of retries), never individual attempts — one flaky night must not
-kill an endpoint. Success resets it and drains ``dropped_count`` (D13:
-the drained value is carried on the next delivery's envelope).
+kill an endpoint. Success resets it and drains ``dropped_count`` —
+the drained value is carried on the next delivery's envelope.
 """
 
 from __future__ import annotations

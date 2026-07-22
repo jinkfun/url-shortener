@@ -65,7 +65,7 @@ class WebhookDomainConsumer:
 
 
 class WebhookFanoutClickSink:
-    """The inline rung's click feed (TRD §5): wraps the inline click sink
+    """The no-queue-Redis deployment's click feed: wraps the inline click sink
     so link.clicked webhooks work with no queue Redis and no worker —
     tracking first, then best-effort dispatch. Never raises past the
     inner sink; a webhook must not cost a redirect."""

@@ -55,7 +55,7 @@ from services.events.protocol import DomainEventSink
 from services.events.sinks import NullDomainEventSink
 from services.meta_tags.events import MetaImageValidateEvent
 from services.meta_tags.images import ingest_meta_image
-from services.webhooks.payloads import link_owner_id, link_snapshot
+from services.webhooks.payloads import build_link_expired, link_owner_id, link_snapshot
 
 if TYPE_CHECKING:
     from infrastructure.cloudflare_kv import CloudflareKVClient
@@ -582,6 +582,14 @@ class UrlService:
                     reason="expiration_time_reached",
                 )
                 await self._url_cache.invalidate(short_code, data.domain)
+                # link.expired fires at discovery, once per link — the
+                # atomic flip above is the gate. One extra read on a
+                # once-per-link branch buys the full snapshot payload.
+                doc = await self._url_repo.find_by_id(ObjectId(data.id))
+                if doc is not None:
+                    event = build_link_expired(doc, "time_expired")
+                    if event is not None:
+                        await self._events.emit(event)
         raise GoneError("URL has expired (expiration time reached)")
 
     async def check_alias_available(
