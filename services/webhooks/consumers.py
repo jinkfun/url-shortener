@@ -43,7 +43,7 @@ class WebhookClickConsumer:
         click = click_event_from_payload(payload)
         if click is None:
             return  # malformed — logged by the decoder, drop
-        event = build_link_clicked(
+        event = await build_link_clicked(
             click, self._system_default_domain, geoip=self._geoip
         )
         if event is None:
@@ -85,7 +85,7 @@ class WebhookFanoutClickSink:
     async def emit(self, event: Any) -> None:
         await self._inner.emit(event)
         try:
-            domain_event = build_link_clicked(
+            domain_event = await build_link_clicked(
                 event, self._system_default_domain, geoip=self._geoip
             )
             if domain_event is not None:

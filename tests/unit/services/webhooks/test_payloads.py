@@ -83,24 +83,35 @@ class TestLinkExpired:
 
 
 class TestLinkClicked:
-    def test_builds_valid_payload_with_no_ip(self):
-        event = build_link_clicked(_click_event(), "spoo.me")
+    async def test_builds_valid_payload_with_no_ip(self):
+        event = await build_link_clicked(_click_event(), "spoo.me")
         assert event is not None
         validate_payload("link.clicked", event.data)
         assert "203.0.113.9" not in str(event.data)
         assert event.data["is_bot"] is False
         assert event.data["user_agent"] == "Mozilla/5.0 (X11; Linux x86_64)"
 
-    def test_user_agent_bounded_and_stripped(self):
+    async def test_user_agent_bounded_and_stripped(self):
         crafted = "Mozilla/5.0 \x00\x1b[31m" + "A" * 2000
-        event = build_link_clicked(_click_event(user_agent=crafted), "spoo.me")
+        event = await build_link_clicked(_click_event(user_agent=crafted), "spoo.me")
         assert event is not None
         ua = event.data["user_agent"]
         assert len(ua) <= 512
         assert "\x00" not in ua and "\x1b" not in ua
 
-    def test_bot_click_flagged_not_suppressed(self):
-        event = build_link_clicked(_click_event(user_agent="curl/8.0"), "spoo.me")
+    async def test_geoip_fallback_is_awaited(self):
+        """The geoip country fallback is async; a regression to an
+        unawaited call would leak a coroutine into the payload."""
+        from unittest.mock import AsyncMock
+
+        geoip = AsyncMock()
+        geoip.get_country_code = AsyncMock(return_value="DE")
+        event = await build_link_clicked(_click_event(), "spoo.me", geoip=geoip)
+        assert event.data["country"] == "DE"
+        validate_payload("link.clicked", event.data)
+
+    async def test_bot_click_flagged_not_suppressed(self):
+        event = await build_link_clicked(_click_event(user_agent="curl/8.0"), "spoo.me")
         assert event is not None
         assert event.data["is_bot"] is True
 

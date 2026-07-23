@@ -145,7 +145,7 @@ def build_link_expired(doc: UrlV2Doc, reason: str) -> DomainEvent | None:
     )
 
 
-def build_link_clicked(
+async def build_link_clicked(
     event: ClickEvent,
     system_default_domain: str,
     geoip: GeoIPService | None = None,
@@ -155,6 +155,10 @@ def build_link_clicked(
     Returns None for unowned links — subscriptions are per-owner, so
     anonymous/v1 clicks have no possible subscriber and skip the
     (comparatively expensive) UA parse entirely.
+
+    Async because the geoip fallback lookup is async; every caller is
+    already in an async context (the webhooks consumer and the inline
+    fanout sink).
     """
     owner_id = event.url.owner_id
     if owner_id is None or owner_id == str(ANONYMOUS_OWNER_ID):
@@ -170,7 +174,7 @@ def build_link_clicked(
     # same mmdb the stats consumer uses. IP itself never leaves this frame.
     country = event.resolved_country
     if country is None and geoip is not None:
-        country = geoip.get_country_code(event.client_ip)
+        country = await geoip.get_country_code(event.client_ip)
 
     domain = event.url.domain or system_default_domain
     return DomainEvent(
