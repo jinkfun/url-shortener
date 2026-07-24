@@ -82,11 +82,13 @@ class DiscordRenderer:
             embed["description"] = clip("\n".join(copy.lines), _DESCRIPTION_MAX)
 
         if copy.pairs:
+            # Short facts sit side by side (Discord flows three per row);
+            # long values like destination URLs take the full width.
             embed["fields"] = [
                 {
                     "name": clip(name, _FIELD_NAME_MAX),
                     "value": clip(value, _FIELD_VALUE_MAX),
-                    "inline": False,
+                    "inline": name != "Destination" and len(value) <= 32,
                 }
                 for name, value in copy.pairs
             ]

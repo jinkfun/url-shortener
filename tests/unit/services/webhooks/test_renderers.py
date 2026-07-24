@@ -45,36 +45,48 @@ class TestRegistry:
 
 
 class TestDiscord:
-    def test_clicked_is_compact_description(self):
+    def test_clicked_renders_an_inline_field_grid(self):
         doc = _discord("link.clicked", _clicked_payload())
         assert doc["username"] == "spoo.me"
         (embed,) = doc["embeds"]
         assert embed["title"] == "Click · spoo.me/summer-drop"
         assert embed["url"] == "https://spoo.me/summer-drop"
         assert embed["timestamp"] == _TS
-        assert "Mumbai, IN · Chrome on Android" in embed["description"]
-        assert "from x.com · click #4,102" in embed["description"]
-        assert "fields" not in embed
+        fields = {f["name"]: f["value"] for f in embed["fields"]}
+        assert fields["Location"] == "Mumbai, IN"
+        assert fields["Device"] == "Chrome · Android · mobile"
+        assert fields["From"] == "x.com"
+        assert fields["UTM"] == "newsletter · email"
+        assert fields["Clicks"] == "4,102"
+        assert all(f["inline"] for f in embed["fields"])
         # Discord renders the embed timestamp itself; footer is brand only.
         assert embed["footer"]["text"] == "spoo.me"
 
-    def test_clicked_omits_absent_dimensions(self):
+    def test_sparse_click_is_never_an_empty_card(self):
+        # A local/direct click has no geo and no referrer; it still carries
+        # Device and shows the truth: a direct visit.
         doc = _discord(
             "link.clicked",
             _clicked_payload(
-                city=None, country="unknown", referrer="(none)", browser=None, os=None
+                city=None,
+                country="unknown",
+                referrer="(none)",
+                utm=None,
+                total_clicks=0,
             ),
         )
-        description = doc["embeds"][0]["description"]
-        assert "unknown" not in description
-        assert "none" not in description
-        assert "from" not in description
+        fields = {f["name"]: f["value"] for f in doc["embeds"][0]["fields"]}
+        assert "Location" not in fields
+        assert "Clicks" not in fields
+        assert fields["From"] == "direct"
+        assert fields["Device"] == "Chrome · Android · mobile"
 
-    def test_clicked_bot_line(self):
+    def test_clicked_bot_field(self):
         doc = _discord(
             "link.clicked", _clicked_payload(is_bot=True, bot_name="GoogleBot")
         )
-        assert "bot · GoogleBot" in doc["embeds"][0]["description"]
+        fields = {f["name"]: f["value"] for f in doc["embeds"][0]["fields"]}
+        assert fields["Bot"] == "GoogleBot"
 
     def test_dropped_notice_rides_the_footer(self):
         doc = _discord("link.clicked", _clicked_payload(dropped_since_last=3))
@@ -106,13 +118,35 @@ class TestDiscord:
             "embeds"
         ]
         names = [f["name"] for f in embed["fields"]]
-        assert names == ["Reason", "Destination", "Total clicks"]
+        assert names == ["Reason", "Destination", "Lifetime clicks"]
         assert embed["fields"][0]["value"] == "Max clicks reached"
 
         (embed,) = _discord("link.deleted", EVENT_REGISTRY["link.deleted"].sample())[
             "embeds"
         ]
-        assert [f["name"] for f in embed["fields"]] == ["Destination", "Total clicks"]
+        fields = {f["name"]: f["value"] for f in embed["fields"]}
+        assert fields["Lifetime clicks"] == "4,102"
+        assert "days" in fields["Age"]
+
+    def test_bare_created_link_still_fills_the_card(self):
+        # No expiry and no cap are answers, not blanks.
+        payload = {"link": {**EVENT_REGISTRY["link.created"].sample()["link"]}}
+        payload["link"]["expires_at"] = None
+        payload["link"]["max_clicks"] = None
+        fields = {
+            f["name"]: f["value"]
+            for f in _discord("link.created", payload)["embeds"][0]["fields"]
+        }
+        assert fields["Expires"] == "never"
+        assert fields["Max clicks"] == "unlimited"
+
+    def test_destination_field_is_full_width(self):
+        (embed,) = _discord("link.created", EVENT_REGISTRY["link.created"].sample())[
+            "embeds"
+        ]
+        by_name = {f["name"]: f for f in embed["fields"]}
+        assert by_name["Destination"]["inline"] is False
+        assert by_name["Expires"]["inline"] is True
 
     def test_test_event_renders_its_message(self):
         (embed,) = _discord("webhook.test", TEST_EVENT_SPEC.sample())["embeds"]
@@ -146,7 +180,7 @@ class TestDiscord:
 
 
 class TestSlack:
-    def test_clicked_is_one_section_plus_context(self):
+    def test_clicked_is_title_fields_context(self):
         doc = _slack("link.clicked", _clicked_payload())
         assert doc["text"] == "Click · spoo.me/summer-drop"
         first, last = doc["blocks"][0], doc["blocks"][-1]
@@ -154,7 +188,9 @@ class TestSlack:
         assert first["text"]["text"].startswith(
             "*<https://spoo.me/summer-drop|Click · spoo.me/summer-drop>*"
         )
-        assert "Mumbai, IN · Chrome on Android" in first["text"]["text"]
+        fields = [f["text"] for f in doc["blocks"][1]["fields"]]
+        assert "*Location*\nMumbai, IN" in fields
+        assert "*From*\nx.com" in fields
         assert last["type"] == "context"
         assert last["elements"][0]["text"] == f"spoo.me · {_TS}"
 
@@ -176,9 +212,10 @@ class TestSlack:
 
     def test_mrkdwn_control_characters_escaped(self):
         payload = _clicked_payload(city="<Berlin & Brandenburg>")
-        text = _slack("link.clicked", payload)["blocks"][0]["text"]["text"]
-        assert "&lt;Berlin &amp; Brandenburg&gt;" in text
-        assert "<Berlin" not in text
+        doc = _slack("link.clicked", payload)
+        fields = " ".join(f["text"] for f in doc["blocks"][1]["fields"])
+        assert "&lt;Berlin &amp; Brandenburg&gt;" in fields
+        assert "<Berlin" not in fields
 
     def test_dropped_notice_rides_the_context_line(self):
         doc = _slack("link.clicked", _clicked_payload(dropped_since_last=1))

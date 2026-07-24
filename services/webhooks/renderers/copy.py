@@ -1,9 +1,11 @@
 """Shared copy for the lossy flavors — one place decides wording and which
 fields earn space, so Discord and Slack never drift apart.
 
-Density is frequency-aware: ``link.clicked`` (high frequency) renders as a
-few compact lines that read well as a stream; lifecycle events (rare)
-render as label/value pairs. Event types this module does not know —
+Every event renders as label/value pairs with guaranteed substance: a
+click always carries Device and From (a referrer-less click is a
+"direct" visit, not a blank), and lifecycle cards state "never" and
+"unlimited" as the real answers they are. Event types this module does
+not know —
 including every future addition to the registry — fall back to the payload
 as a JSON code block, so adding an event can never terminal-fail a
 flavored endpoint.
@@ -13,6 +15,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -112,35 +115,54 @@ def _referrer_host(referrer: Any) -> str:
     return host or text
 
 
-def _clicked_lines(payload: dict[str, Any]) -> list[str]:
-    lines: list[str] = []
+def _date_part(value: Any) -> str:
+    return str(value)[:10] if _present(value) else "never"
+
+
+def _age_days(created_at: Any, occurred_at: str) -> int | None:
+    try:
+        created = datetime.fromisoformat(str(created_at))
+        occurred = datetime.fromisoformat(occurred_at)
+        return max(0, (occurred - created).days)
+    except (TypeError, ValueError):
+        return None
+
+
+def _clicked_pairs(payload: dict[str, Any]) -> list[tuple[str, str]]:
+    """A click always renders at least Device and From — absent analytics
+    dimensions are skipped, but a referrer-less click IS a direct visit
+    and renders as one, never as an empty card."""
+    pairs: list[tuple[str, str]] = []
 
     place = [
         str(v) for v in (payload.get("city"), payload.get("country")) if _present(v)
     ]
-    agent = ""
-    if _present(payload.get("browser")) and _present(payload.get("os")):
-        agent = f"{payload['browser']} on {payload['os']}"
-    elif _present(payload.get("browser")):
-        agent = str(payload["browser"])
-    first = " · ".join(part for part in (", ".join(place), agent) if part)
-    if first:
-        lines.append(first)
+    if place:
+        pairs.append(("Location", ", ".join(place)))
 
-    second: list[str] = []
-    if _present(payload.get("referrer")):
-        second.append(f"from {_referrer_host(payload['referrer'])}")
-    total = payload.get("total_clicks")
-    if isinstance(total, int):
-        second.append(f"click #{total:,}")
-    if second:
-        lines.append(" · ".join(second))
+    agent = " · ".join(
+        str(payload[k]) for k in ("browser", "os", "device") if _present(payload.get(k))
+    )
+    pairs.append(("Device", agent or "not detected"))
+
+    referrer = payload.get("referrer")
+    pairs.append(("From", _referrer_host(referrer) if _present(referrer) else "direct"))
+
+    utm = payload.get("utm")
+    if isinstance(utm, dict):
+        campaign = " · ".join(str(v) for v in utm.values() if _present(v))
+        if campaign:
+            pairs.append(("UTM", campaign))
 
     if payload.get("is_bot"):
         bot = payload.get("bot_name")
-        lines.append(f"bot · {bot}" if _present(bot) else "bot traffic")
+        pairs.append(("Bot", str(bot) if _present(bot) else "detected"))
 
-    return [clip(line, _VALUE_MAX) for line in lines] or ["Tracked click recorded"]
+    total = payload.get("total_clicks")
+    if isinstance(total, int) and total > 0:
+        pairs.append(("Clicks", f"{total:,}"))
+
+    return [(name, clip(value, _VALUE_MAX)) for name, value in pairs]
 
 
 def _updated_changes(payload: dict[str, Any]) -> list[tuple[str, str, str]]:
@@ -155,9 +177,14 @@ def _updated_changes(payload: dict[str, Any]) -> list[tuple[str, str, str]]:
     return out
 
 
-def _lifecycle_pairs(event_type: str, payload: dict[str, Any]) -> list[tuple[str, str]]:
+def _lifecycle_pairs(
+    event_type: str, payload: dict[str, Any], occurred_at: str
+) -> list[tuple[str, str]]:
+    """Lifecycle cards lead with facts that always exist — an expiry of
+    "never" and a cap of "unlimited" are real answers, not blanks."""
     link = _link_of(event_type, payload)
     pairs: list[tuple[str, str]] = []
+    total = link.get("total_clicks")
 
     if event_type == "link.expired":
         reason = payload.get("reason")
@@ -165,17 +192,27 @@ def _lifecycle_pairs(event_type: str, payload: dict[str, Any]) -> list[tuple[str
 
     if _present(link.get("long_url")):
         pairs.append(("Destination", _fmt(link["long_url"])))
+
     if event_type == "link.created":
-        if _present(link.get("expires_at")):
-            pairs.append(("Expires", _fmt(link["expires_at"])))
-        if _present(link.get("max_clicks")):
-            pairs.append(("Max clicks", _fmt(link["max_clicks"])))
+        pairs.append(("Expires", _date_part(link.get("expires_at"))))
+        max_clicks = link.get("max_clicks")
+        pairs.append(
+            (
+                "Max clicks",
+                f"{max_clicks:,}" if isinstance(max_clicks, int) else "unlimited",
+            )
+        )
         if link.get("password_protected"):
-            pairs.append(("Password protected", "yes"))
-    if event_type in ("link.deleted", "link.expired") and isinstance(
-        link.get("total_clicks"), int
-    ):
-        pairs.append(("Total clicks", f"{link['total_clicks']:,}"))
+            pairs.append(("Password", "protected"))
+        if link.get("block_bots"):
+            pairs.append(("Bots", "blocked"))
+
+    if event_type in ("link.deleted", "link.expired") and isinstance(total, int):
+        pairs.append(("Lifetime clicks", f"{total:,}"))
+    if event_type == "link.deleted":
+        age = _age_days(link.get("created_at"), occurred_at)
+        if age is not None:
+            pairs.append(("Age", f"{age:,} days" if age != 1 else "1 day"))
 
     return pairs
 
@@ -188,7 +225,7 @@ def build_copy(event_type: str, timestamp: str, payload: dict[str, Any]) -> Copy
     context = f"spoo.me · {timestamp}" + (f" · {notice}" if notice else "")
 
     if event_type == "link.clicked":
-        return Copy(title, url, context, notice, lines=_clicked_lines(payload))
+        return Copy(title, url, context, notice, pairs=_clicked_pairs(payload))
     if event_type == "webhook.test":
         message = payload.get("message")
         lines = [clip(str(message), _VALUE_MAX)] if _present(message) else []
@@ -197,7 +234,11 @@ def build_copy(event_type: str, timestamp: str, payload: dict[str, Any]) -> Copy
         return Copy(title, url, context, notice, changes=_updated_changes(payload))
     if event_type in ("link.created", "link.deleted", "link.expired"):
         return Copy(
-            title, url, context, notice, pairs=_lifecycle_pairs(event_type, payload)
+            title,
+            url,
+            context,
+            notice,
+            pairs=_lifecycle_pairs(event_type, payload, timestamp),
         )
 
     shown = {k: v for k, v in payload.items() if k != "dropped_since_last"}
