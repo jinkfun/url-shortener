@@ -72,7 +72,7 @@ class WebhookEndpointRepository(BaseRepository[WebhookEndpointDoc]):
                     "last_delivery_at": now,
                     "last_success_at": now,
                 },
-                "$inc": {"total_deliveries": 1, "total_successes": 1},
+                "$inc": {"total_successes": 1},
             },
             projection={"dropped_count": 1},
         )
@@ -87,11 +87,17 @@ class WebhookEndpointRepository(BaseRepository[WebhookEndpointDoc]):
                     "last_delivery_at": datetime.now(timezone.utc),
                     "last_failure_reason": reason,
                 },
-                "$inc": {"total_deliveries": 1, "consecutive_failures": 1},
+                "$inc": {"consecutive_failures": 1},
             },
             return_document=True,
         )
         return int(doc.get("consecutive_failures", 0)) if doc else 0
+
+    async def increment_deliveries(self, endpoint_id: ObjectId, by: int = 1) -> None:
+        """Counted at ENQUEUE, not at terminal state — "0 of 2" while two
+        deliveries are mid-ladder beats a "0 of 0" that contradicts the
+        visible delivery log. Success keeps its own counter."""
+        await self._update({"_id": endpoint_id}, {"$inc": {"total_deliveries": by}})
 
     async def increment_dropped(self, endpoint_id: ObjectId) -> None:
         await self._update({"_id": endpoint_id}, {"$inc": {"dropped_count": 1}})

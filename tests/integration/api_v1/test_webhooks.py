@@ -107,7 +107,6 @@ class _FakeEndpointRepo:
             {
                 "consecutive_failures": 0,
                 "dropped_count": 0,
-                "total_deliveries": doc.total_deliveries + 1,
                 "total_successes": doc.total_successes + 1,
                 "last_delivery_at": datetime.now(timezone.utc),
                 "last_success_at": datetime.now(timezone.utc),
@@ -122,11 +121,16 @@ class _FakeEndpointRepo:
             endpoint_id,
             {
                 "consecutive_failures": streak,
-                "total_deliveries": doc.total_deliveries + 1,
                 "last_failure_reason": reason,
             },
         )
         return streak
+
+    async def increment_deliveries(self, endpoint_id, by=1):
+        doc = self.docs[endpoint_id]
+        await self.update_fields(
+            endpoint_id, {"total_deliveries": doc.total_deliveries + by}
+        )
 
     async def increment_dropped(self, endpoint_id):
         doc = self.docs[endpoint_id]
