@@ -44,6 +44,10 @@ USER_AGENT = "spoo.me-webhooks/1.0 (+https://spoo.me)"
 # Standard Webhooks retry convention: immediate, 5s, 5m, 30m, 2h, 5h, 10h.
 RETRY_SCHEDULE_SECONDS = (0, 5, 300, 1800, 7200, 18000, 36000)
 
+# 429 handling: honor Retry-After within a ceiling, else back off a minute.
+RATE_LIMIT_FALLBACK_SECONDS = 60
+RATE_LIMIT_MAX_DEFER_SECONDS = 900
+
 # Type of the on-disable hook — wiring plugs email notification in here so
 # the executor never grows an email dependency.
 OnDisabled = Callable[[WebhookEndpointDoc, str], Awaitable[None]]
@@ -180,6 +184,29 @@ class DeliveryExecutor:
                 is_test=row.is_test,
             )
             return
+
+        if result.status_code == 429 and not single_shot:
+            # Rate limiting is receiver flow control, not endpoint failure —
+            # normal operation for Discord/Slack receivers. Hold the row
+            # without burning a ladder attempt or touching the streak; the
+            # delivery-log TTL is the backstop for a receiver that
+            # rate-limits forever, and the pending cap bounds the queue.
+            delay = int(
+                min(
+                    result.retry_after_seconds or RATE_LIMIT_FALLBACK_SECONDS,
+                    RATE_LIMIT_MAX_DEFER_SECONDS,
+                )
+            )
+            await self._deliveries.defer(row.id, delay_seconds=delay)
+            log.info(
+                "webhook_delivery_rate_limited",
+                endpoint_id=str(endpoint.id),
+                event_type=row.event_type,
+                webhook_id=row.webhook_id,
+                delay_seconds=delay,
+            )
+            return
+
         log.warning(
             "webhook_delivery_attempt_failed",
             endpoint_id=str(endpoint.id),

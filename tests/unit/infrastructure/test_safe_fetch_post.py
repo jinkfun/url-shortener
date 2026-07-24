@@ -11,7 +11,9 @@ import pytest
 from infrastructure.safe_fetch import (
     FetchHardError,
     FetchTransientError,
+    PostResult,
     _is_public,
+    _parse_retry_after,
     post_public,
 )
 
@@ -115,3 +117,25 @@ class TestPostPublic:
             result = await post_public("https://example.com/hook", "{}", headers={})
         assert result.status_code == 302
         assert "redirect" in result.error
+
+
+class TestRetryAfter:
+    @pytest.mark.parametrize(
+        ("header", "expected"),
+        [
+            ("5", 5.0),
+            ("0", 0.0),
+            (" 12 ", 12.0),
+            ("1.5", 1.5),
+            ("-3", None),  # negative is nonsense, ignore
+            ("Wed, 21 Oct 2026 07:28:00 GMT", None),  # HTTP-date form not parsed
+            ("soon", None),
+            (None, None),
+        ],
+    )
+    def test_parse_retry_after(self, header, expected):
+        assert _parse_retry_after(header) == expected
+
+    def test_post_result_defaults_to_no_retry_after(self):
+        # Three-arg construction (every non-header call site) stays valid.
+        assert PostResult(500, None, None).retry_after_seconds is None

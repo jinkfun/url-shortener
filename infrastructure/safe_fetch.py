@@ -248,6 +248,20 @@ class PostResult:
     status_code: int | None
     error: str | None
     body_snippet: str | None  # first 256 bytes, for the delivery log
+    # Parsed integer Retry-After, when the receiver sent one (429/503 flow
+    # control). HTTP-date form is not parsed — callers fall back to their
+    # own delay.
+    retry_after_seconds: float | None = None
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        seconds = float(value.strip())
+    except ValueError:
+        return None
+    return seconds if seconds >= 0 else None
 
 
 async def post_public(
@@ -295,7 +309,12 @@ async def post_public(
                 except (asyncio.TimeoutError, TimeoutError):
                     buf = bytearray()
                 snippet = bytes(buf).decode("utf-8", errors="replace") if buf else None
-                return PostResult(resp.status_code, None, snippet)
+                return PostResult(
+                    resp.status_code,
+                    None,
+                    snippet,
+                    _parse_retry_after(resp.headers.get("retry-after")),
+                )
             finally:
                 await resp.aclose()
     except (httpx.TimeoutException, httpx.TransportError) as exc:
