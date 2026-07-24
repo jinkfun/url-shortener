@@ -283,6 +283,15 @@ describe("lookupKey routing", () => {
     ["https://spoo.me/favicon.ico", null],
     ["https://spoo.me/a/b", null],
     ["https://spoo.me/abc?password=x", null],
+    // Next-owned single-segment pages: reserved aliases, exact-match skip.
+    ["https://spoo.me/pricing", null],
+    ["https://spoo.me/onboarding", null],
+    ["https://spoo.me/relay/e", null],
+    // ...but a reserved-adjacent alias keeps its lookup.
+    ["https://spoo.me/aboutus", "cache:spoo.me:aboutus"],
+    // /{code}+ is preview intent, never a key (emoji arrives encoded).
+    ["https://spoo.me/abc1234+", null],
+    ["https://spoo.me/%F0%9F%9A%80+", null],
   ];
 
   for (const [url, expected] of cases) {

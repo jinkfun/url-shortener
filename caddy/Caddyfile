@@ -67,6 +67,36 @@
 	}
 }
 
+# Compose one branded error page (beta): when the origin self-describes
+# an error (X-Error-Code) and the client meaningfully asked for HTML,
+# swap the body for the Next error page while KEEPING the origin status
+# (the inner proxy would otherwise answer with Next's 200). JSON clients
+# and Accept:*/* scanner probes get the origin response untouched —
+# composition costs a Next render. args[0] = the status code.
+(compose_beta_err) {
+	@err{args[0]} {
+		status {args[0]}
+		header X-Error-Code *
+	}
+	handle_response @err{args[0]} {
+		@html{args[0]} {
+			header Accept *text/html*
+			method GET HEAD
+		}
+		handle @html{args[0]} {
+			rewrite * /_error/{args[0]}?code={rp.header.X-Error-Code}&from={uri}
+			reverse_proxy spoo_next_beta:3000 {
+				@ok{args[0]} status 2xx
+				replace_status @ok{args[0]} {args[0]}
+				header_up Host {host}
+			}
+		}
+		handle {
+			copy_response
+		}
+	}
+}
+
 spoo.me, www.spoo.me {
 	import common_tls
 	reverse_proxy app:8000 {
@@ -80,9 +110,88 @@ spoo.me, www.spoo.me {
 # container name, not compose service name.
 beta.spoo.me {
 	import common_tls
+
+	# BETA-ONLY (do not port to prod): beta is a duplicate of the whole
+	# site — never let crawlers index it. Wins over the matchers below
+	# because handle is ordered before reverse_proxy.
+	@robots path /robots.txt
+	handle @robots {
+		header Content-Type "text/plain; charset=utf-8"
+		respond "User-agent: *
+Disallow: /" 200
+	}
+
+	# Only paths with a built Next page belong here — a listed path
+	# with no page behind it 404s in Next instead of falling through
+	# to FastAPI.
+	@next {
+		path /about /about/*
+		path /pricing /pricing/*
+		path /apps /apps/*
+		path /testimonials /testimonials/*
+		path /login /signup /forgot-password
+		path /onboarding /onboarding/*
+		path /privacy /terms /legal
+		path /relay/*
+		path /dashboard /dashboard/*
+		# Composed-error URL (Next rewrites it to error-pages/ internally).
+		path /_error/*
+		path /_next/* /icon.png
+		path /favicon.ico /favicon.png /favicon.svg
+		# Next public/ asset dirs + the favicon-proxy route. A new top-level
+		# dir under public/ needs a line here AND a reserved-aliases entry,
+		# or it 404s through FastAPI and takes client pages down with it.
+		path /geo/* /brand/* /icons-3d/*
+		path /api/favicon
+		# SEO files (robots.ts/sitemap.ts generators + public/ text files).
+		# Exact .well-known path only — the rest of that namespace stays
+		# with the backend for whatever claims it later.
+		path /robots.txt /sitemap.xml /humans.txt
+		path /security.txt /.well-known/security.txt
+	}
+	reverse_proxy @next spoo_next_beta:3000 {
+		header_up X-Real-IP {client_ip}
+		header_up X-Forwarded-For {client_ip}
+		header_up Host {host}
+	}
+
+	# Paths whose GET is a Next page but whose POST is a shipped backend
+	# contract: / (the original anonymous shorten API), /contact and
+	# /report (legacy form intakes), /stats (legacy lookup form) and
+	# /stats/{code} (the legacy public JSON API). Next serves pages to
+	# POSTs with a 200, so an unscoped matcher silently breaks every one
+	# of these for API clients — caught twice on beta.
+	@next_get {
+		method GET HEAD
+		path / /contact /report
+		path /stats /stats/*
+	}
+	reverse_proxy @next_get spoo_next_beta:3000 {
+		header_up X-Real-IP {client_ip}
+		header_up X-Forwarded-For {client_ip}
+		header_up Host {host}
+	}
+
+	# /{code}+ preview — any single segment ending in + (matched against
+	# the DECODED path, so emoji aliases land here too). No valid alias
+	# contains +, so this can never shadow a real code.
+	@preview path_regexp ^/[^/]+\+$
+	reverse_proxy @preview spoo_next_beta:3000 {
+		header_up X-Real-IP {client_ip}
+		header_up X-Forwarded-For {client_ip}
+		header_up Host {host}
+	}
+
+	# Everything else: short codes, /auth/*, /oauth/*, /api/v1/*, /static/*
 	reverse_proxy spoo_app_beta:8000 {
 		header_up X-Real-IP {client_ip}
 		header_up X-Forwarded-For {client_ip}
+
+		import compose_beta_err 404
+		import compose_beta_err 410
+		import compose_beta_err 429
+		import compose_beta_err 451
+		import compose_beta_err 500
 	}
 }
 
