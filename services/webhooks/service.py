@@ -14,7 +14,7 @@ from typing import Any
 from bson import ObjectId
 
 from errors import NotFoundError, ValidationError
-from infrastructure.crypto import encrypt_secret
+from infrastructure.crypto import decrypt_secret, encrypt_secret
 from infrastructure.logging import get_logger
 from infrastructure.safe_fetch import FetchHardError, validate_public_https_url
 from repositories.webhook_delivery_repository import WebhookDeliveryRepository
@@ -140,6 +140,27 @@ class WebhookService:
             await self._endpoints.update_fields(endpoint_id, updates)
             await self._cache.invalidate(str(user_id))
         return await self.get_endpoint(endpoint_id, user_id)
+
+    async def reveal_secret(self, endpoint_id: ObjectId, user_id: ObjectId) -> str:
+        """The stored secret is encrypted, never hashed (the executor must
+        read it back to sign), so revealing it to its owner is an ordinary
+        read. A secret the master key can no longer open is reported
+        instead of raising a bare crypto error."""
+        doc = await self.get_endpoint(endpoint_id, user_id)
+        try:
+            return decrypt_secret(
+                doc.signing_secret_enc, self._master_secret, domain=SECRET_ENC_DOMAIN
+            )
+        except Exception as exc:
+            log.error(
+                "webhook_secret_reveal_failed",
+                endpoint_id=str(endpoint_id),
+                error_type=type(exc).__name__,
+            )
+            raise ValidationError(
+                "The stored secret can no longer be read. Delete this "
+                "endpoint and create it again."
+            ) from exc
 
     async def delete_endpoint(self, endpoint_id: ObjectId, user_id: ObjectId) -> None:
         if not await self._endpoints.delete_endpoint(endpoint_id, user_id):

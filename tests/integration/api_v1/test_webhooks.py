@@ -544,3 +544,19 @@ def test_create_rejects_unknown_flavor_422():
     with _NO_SSRF, TestClient(app) as c:
         resp = c.post(_URL, json=_create_body(flavor="teams"))
         assert resp.status_code == 422
+
+
+def test_reveal_secret_returns_the_created_secret():
+    app, _, _, _ = _build()
+    with _NO_SSRF, TestClient(app) as c:
+        created = c.post(_URL, json=_create_body()).json()
+        revealed = c.get(f"{_URL}/{created['id']}/secret")
+        assert revealed.status_code == 200
+        assert revealed.json()["signing_secret"] == created["signing_secret"]
+
+
+def test_reveal_secret_unknown_endpoint_404():
+    app, _, _, _ = _build()
+    with _NO_SSRF, TestClient(app) as c:
+        resp = c.get(f"{_URL}/{ObjectId()}/secret")
+        assert resp.status_code == 404

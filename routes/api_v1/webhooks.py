@@ -48,6 +48,7 @@ from schemas.dto.responses.webhook import (
     WebhookEndpointCreatedResponse,
     WebhookEndpointResponse,
     WebhookEndpointsListResponse,
+    WebhookSecretResponse,
 )
 from schemas.enums.webhook import DeliveryStatus
 from services.feature_flag_service import WEBHOOKS_FLAG
@@ -171,6 +172,27 @@ async def get_endpoint(
         _oid(endpoint_id, "endpoint"), user.user_id
     )
     return WebhookEndpointResponse.from_doc(doc)
+
+
+@router.get(
+    "/webhooks/{endpoint_id}/secret",
+    responses={**AUTH_RESPONSES, **ERROR_RESPONSES},
+    operation_id="revealWebhookSecret",
+    summary="Reveal Signing Secret",
+)
+@limiter.limit(Limits.WEBHOOK_READ)
+async def reveal_secret(
+    request: Request,
+    endpoint_id: Annotated[str, Path()],
+    user: ManageUser,
+    webhook_service: WebhookSvc,
+) -> WebhookSecretResponse:
+    """The full signing secret, for the endpoint owner. Secrets are stored
+    encrypted and readable on demand; treat the response like a password."""
+    secret = await webhook_service.reveal_secret(
+        _oid(endpoint_id, "endpoint"), user.user_id
+    )
+    return WebhookSecretResponse(signing_secret=secret)
 
 
 @router.patch(
