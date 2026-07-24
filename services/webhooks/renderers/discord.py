@@ -1,17 +1,23 @@
-"""Discord flavor — one embed per event, ready for a Discord webhook URL.
+"""Discord flavor — a Components V2 message, ready for a channel webhook.
 
-Receiver limits enforced locally (title 256, description 4096, field
-name 256 / value 1024, footer 2048, 6000 chars across the embed) so a
-rendered body is never rejected for size by Discord itself; the engine's
-max_payload_bytes cap still applies on top.
+The rendered body is a components-only message (flag 32768): one
+accent-colored container holding a heading, a divider, the event's
+substance, and a small-text footer with a timestamp Discord localizes
+per viewer (``<t:...>``). Delivery must carry ``with_components=true``
+on the webhook URL — declared here via ``url_query`` and appended by
+the executor, since the signature covers the body alone.
+
+Mentions are hard-disabled: text displays CAN ping (embeds never
+could), and payload values are user-controlled.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+from datetime import datetime
+from typing import Any, ClassVar
 
-from services.webhooks.renderers.copy import build_copy, clip
+from services.webhooks.renderers.copy import build_copy, clicked_summary, clip
 
 _COLORS = {
     "link.created": 0x43B581,
@@ -25,12 +31,27 @@ _DEFAULT_COLOR = 0x99AAB5
 
 AVATAR_URL = "https://spoo.me/static/images/favicon.png"
 
-_TITLE_MAX = 256
-_DESCRIPTION_MAX = 4096
-_FIELD_NAME_MAX = 256
-_FIELD_VALUE_MAX = 1024
-_FOOTER_MAX = 2048
-_EMBED_TOTAL_MAX = 6000
+# Footer verb per event; ``f`` renders an absolute local time, ``R`` a
+# live relative one — moments for high-frequency events, dates for rare.
+_FOOTERS = {
+    "link.clicked": ("click", "R"),
+    "link.created": ("created", "f"),
+    "link.updated": ("updated", "R"),
+    "link.deleted": ("deleted", "f"),
+    "link.expired": ("expired", "R"),
+    "webhook.test": ("sent", "R"),
+}
+
+_TEXT_MAX = 3_500  # defensive budget across all text displays
+_SUBTITLE_MAX = 200
+
+
+def _td(content: str) -> dict[str, Any]:
+    return {"type": 10, "content": content}
+
+
+def _sep(spacing: int = 1, divider: bool = False) -> dict[str, Any]:
+    return {"type": 14, "spacing": spacing, "divider": divider}
 
 
 def _fence(text: str) -> str:
@@ -38,91 +59,98 @@ def _fence(text: str) -> str:
     return text.replace("```", "'''")
 
 
-def _embed_size(embed: dict[str, Any]) -> int:
-    total = len(embed.get("title", "")) + len(embed.get("description", ""))
-    total += len(embed.get("footer", {}).get("text", ""))
-    for field in embed.get("fields", []):
-        total += len(field["name"]) + len(field["value"])
-    return total
-
-
 class DiscordRenderer:
     flavor = "discord"
+    # Appended to the endpoint URL at delivery time; components-v2 bodies
+    # are rejected without it.
+    url_query: ClassVar[dict[str, str]] = {"with_components": "true"}
 
     def render(
         self, event_id: str, event_type: str, timestamp: str, payload: dict[str, Any]
     ) -> str:
         copy = build_copy(event_type, timestamp, payload)
+        try:
+            epoch = int(datetime.fromisoformat(timestamp).timestamp())
+        except ValueError:
+            epoch = None
 
-        # The webhook's own username and avatar carry the brand, and the
-        # embed timestamp renders natively in the viewer's timezone — the
-        # footer exists only for the drop notice.
-        embed: dict[str, Any] = {
-            "title": clip(copy.title, _TITLE_MAX),
-            "color": _COLORS.get(event_type, _DEFAULT_COLOR),
-            "timestamp": timestamp,
-        }
-        if copy.notice:
-            embed["footer"] = {"text": clip(copy.notice, _FOOTER_MAX)}
-        if copy.title_url:
-            embed["url"] = copy.title_url
+        label = copy.label or copy.title
+        components: list[dict[str, Any]] = []
 
-        if copy.changes:
-            # Discord colors diff blocks: removed lines red, added green —
-            # the old/new pair reads at a glance.
+        # Heading: linked short address, except a deleted link has no
+        # living address to point at.
+        if copy.display and copy.title_url and event_type != "link.deleted":
+            components.append(_td(f"### {label}  [{copy.display}]({copy.title_url})"))
+        elif copy.display:
+            components.append(_td(f"### {label}  {copy.display}"))
+        else:
+            components.append(_td(f"### {label}"))
+        if copy.subtitle:
+            components.append(_td(f"-# {clip(copy.subtitle, _SUBTITLE_MAX)}"))
+
+        lifecycle = event_type in ("link.created", "link.deleted", "link.expired")
+        components.append(_sep(2 if lifecycle else 1, divider=True))
+
+        count: str | None = None
+        if event_type == "link.clicked":
+            lines, count = clicked_summary(payload)
+            components.append(_td("\n".join(lines)))
+        elif copy.changes:
             diff_lines: list[str] = []
             for name, old, new in copy.changes:
                 diff_lines.append(f"- {name}: {_fence(old)}")
                 diff_lines.append(f"+ {name}: {_fence(new)}")
-            embed["description"] = clip(
-                "```diff\n" + "\n".join(diff_lines) + "\n```", _DESCRIPTION_MAX
+            components.append(_td("```diff\n" + "\n".join(diff_lines) + "\n```"))
+        elif copy.pairs:
+            components.append(
+                _td(
+                    "\n".join(
+                        f"**{name}**  {value}"
+                        for name, value in copy.pairs
+                        if name != "Destination"  # the subtitle already says it
+                    )
+                )
             )
         elif copy.code:
-            embed["description"] = clip(
-                "```json\n" + _fence(copy.code) + "\n```", _DESCRIPTION_MAX
-            )
+            components.append(_td("```json\n" + _fence(copy.code) + "\n```"))
         elif copy.lines:
-            embed["description"] = clip("\n".join(copy.lines), _DESCRIPTION_MAX)
+            components.append(_td("\n".join(copy.lines)))
 
-        if copy.pairs:
-            # Two facts per row, never Discord's cramped three: a blank
-            # spacer field closes each pair so the grid stays airy. Long
-            # values like destination URLs take the full width up top.
-            fields: list[dict[str, Any]] = []
-            grid: list[tuple[str, str]] = []
-            for name, value in copy.pairs:
-                if name == "Destination" or len(value) > 32:
-                    fields.append(
-                        {
-                            "name": clip(name, _FIELD_NAME_MAX),
-                            "value": clip(value, _FIELD_VALUE_MAX),
-                            "inline": False,
-                        }
-                    )
-                else:
-                    grid.append((name, value))
-            for i, (name, value) in enumerate(grid):
-                fields.append(
-                    {
-                        "name": clip(name, _FIELD_NAME_MAX),
-                        "value": clip(value, _FIELD_VALUE_MAX),
-                        "inline": True,
-                    }
-                )
-                if i % 2 == 1 and i < len(grid) - 1:
-                    fields.append({"name": "\u200b", "value": "\u200b", "inline": True})
-            embed["fields"] = fields
+        components.append(_sep(2))
+        verb, style = _FOOTERS.get(event_type, ("received", "f"))
+        footer = f"-# {verb}"
+        if event_type == "link.clicked" and count is not None:
+            footer += f" {count}"
+        if epoch is not None:
+            footer += f"   <t:{epoch}:{style}>"
+        if copy.notice:
+            footer += f"\n-# {copy.notice}"
+        components.append(_td(footer))
 
-        while _embed_size(embed) > _EMBED_TOTAL_MAX and embed.get("fields"):
-            embed["fields"].pop()
-        if _embed_size(embed) > _EMBED_TOTAL_MAX and "description" in embed:
-            overflow = _embed_size(embed) - _EMBED_TOTAL_MAX
-            embed["description"] = clip(
-                embed["description"], max(1, len(embed["description"]) - overflow)
+        # Defensive budget: receivers reject oversize messages whole, so a
+        # pathological body gets its largest block clipped instead.
+        total = sum(len(c.get("content", "")) for c in components)
+        if total > _TEXT_MAX:
+            biggest = max(components, key=lambda c: len(c.get("content", "")))
+            overflow = total - _TEXT_MAX
+            biggest["content"] = clip(
+                biggest["content"], max(1, len(biggest["content"]) - overflow)
             )
 
         return json.dumps(
-            {"username": "spoo.me", "avatar_url": AVATAR_URL, "embeds": [embed]},
+            {
+                "username": "spoo.me",
+                "avatar_url": AVATAR_URL,
+                "flags": 32768,
+                "allowed_mentions": {"parse": []},
+                "components": [
+                    {
+                        "type": 17,
+                        "accent_color": _COLORS.get(event_type, _DEFAULT_COLOR),
+                        "components": components,
+                    }
+                ],
+            },
             separators=(",", ":"),
             default=str,
         )

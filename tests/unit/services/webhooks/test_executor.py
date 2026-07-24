@@ -359,3 +359,24 @@ class TestRateLimit:
             deliveries.record_attempt_and_finish.await_args[0][2]
             is DeliveryStatus.FAILED
         )
+
+
+class TestDeliveryUrl:
+    @pytest.mark.asyncio
+    async def test_discord_flavor_appends_components_param(self):
+        endpoint = _endpoint(flavor=WebhookFlavor.DISCORD)
+        executor, _, _, _ = _make(endpoint)
+        post = _post(204)
+        with patch("services.webhooks.executor.post_public", post):
+            await executor.attempt(_delivery())
+        url = post.await_args[0][0]
+        assert url == f"{endpoint.url}?with_components=true"
+
+    @pytest.mark.asyncio
+    async def test_raw_flavor_url_is_untouched(self):
+        endpoint = _endpoint()
+        executor, _, _, _ = _make(endpoint)
+        post = _post(204)
+        with patch("services.webhooks.executor.post_public", post):
+            await executor.attempt(_delivery())
+        assert post.await_args[0][0] == endpoint.url

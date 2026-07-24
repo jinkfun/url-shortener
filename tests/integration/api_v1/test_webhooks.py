@@ -529,11 +529,16 @@ def test_send_test_renders_discord_flavor_and_signature_covers_it():
         assert resp.status_code == 200
         assert resp.json()["status"] == "success"
 
-        _, body = post.await_args[0]
+        url, body = post.await_args[0]
         headers = post.await_args.kwargs["headers"]
+        assert url.endswith("?with_components=true")
         sent = json.loads(body)
         assert sent["username"] == "spoo.me"
-        assert sent["embeds"][0]["title"].startswith("Click")
+        assert sent["flags"] == 32768
+        texts = [
+            c["content"] for c in sent["components"][0]["components"] if c["type"] == 10
+        ]
+        assert texts[0].startswith("### Click")
         assert verify(
             headers["webhook-id"],
             int(headers["webhook-timestamp"]),

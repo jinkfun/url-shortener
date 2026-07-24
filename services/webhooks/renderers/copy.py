@@ -77,9 +77,14 @@ class Copy:
     title_url: str | None
     # ``context`` is the full footer line (brand + time + notice) for flavors
     # without a native timestamp slot; ``notice`` alone is for flavors that
-    # render time themselves (Discord's embed timestamp).
+    # render time themselves.
     context: str
     notice: str | None = None
+    # Title split for flavors that compose their own heading markup, and
+    # the destination as a one-line subtitle for lifecycle events.
+    label: str = ""
+    display: str | None = None
+    subtitle: str | None = None
     lines: list[str] = field(default_factory=list)
     pairs: list[tuple[str, str]] = field(default_factory=list)
     changes: list[tuple[str, str, str]] = field(default_factory=list)
@@ -239,21 +244,88 @@ def _lifecycle_pairs(
     return pairs
 
 
+def clicked_summary(payload: dict[str, Any]) -> tuple[list[str], str | None]:
+    """Grouped one-per-topic lines for vertical layouts (Components V2),
+    plus the running count for the footer."""
+    lines: list[str] = []
+    if _present(payload.get("country")):
+        line = _country_display_bold(payload["country"])
+        if _present(payload.get("city")):
+            line += f"  {payload['city']}"
+        lines.append(line)
+    elif _present(payload.get("city")):
+        lines.append(str(payload["city"]))
+
+    device_bits = [
+        str(payload[k]) for k in ("browser", "os") if _present(payload.get(k))
+    ]
+    device = " on ".join(device_bits)
+    if _present(payload.get("device")):
+        device = f"{device}, {payload['device']}" if device else str(payload["device"])
+    if device:
+        lines.append(device)
+
+    referrer = payload.get("referrer")
+    source = (
+        f"from **{_referrer_host(referrer)}**" if _present(referrer) else "direct visit"
+    )
+    utm = payload.get("utm")
+    if isinstance(utm, dict):
+        campaign = " / ".join(str(v) for v in utm.values() if _present(v))
+        if campaign:
+            source += f"  ({campaign})"
+    lines.append(source)
+
+    if payload.get("is_bot"):
+        bot = payload.get("bot_name")
+        lines.append(f"bot  **{bot}**" if _present(bot) else "bot traffic")
+
+    total = payload.get("total_clicks")
+    count = f"{total:,}" if isinstance(total, int) else None
+    return [clip(line, _VALUE_MAX) for line in lines], count
+
+
+def _country_display_bold(code: Any) -> str:
+    text = str(code)
+    if len(text) == 2 and text.isascii() and text.isalpha():
+        upper = text.upper()
+        flag = "".join(chr(0x1F1E6 + ord(c) - 65) for c in upper)
+        return f"{flag} **{upper}**"
+    return str(code)
+
+
 def build_copy(event_type: str, timestamp: str, payload: dict[str, Any]) -> Copy:
     link = _link_of(event_type, payload)
     title = _title(event_type, link)
     url = link.get("short_url") if _present(link.get("short_url")) else None
     notice = _notice(payload)
     context = f"spoo.me · {timestamp}" + (f" · {notice}" if notice else "")
+    label = EVENT_LABELS.get(event_type, event_type)
+    display = (
+        f"{link.get('domain')}/{link.get('alias')}"
+        if _present(link.get("alias")) and _present(link.get("domain"))
+        else None
+    )
+    subtitle = (
+        str(link.get("long_url"))
+        if event_type in ("link.created", "link.deleted", "link.expired")
+        and _present(link.get("long_url"))
+        else None
+    )
 
+    common = dict(label=label, display=display, subtitle=subtitle)
     if event_type == "link.clicked":
-        return Copy(title, url, context, notice, pairs=_clicked_pairs(payload))
+        return Copy(
+            title, url, context, notice, pairs=_clicked_pairs(payload), **common
+        )
     if event_type == "webhook.test":
         message = payload.get("message")
         lines = [clip(str(message), _VALUE_MAX)] if _present(message) else []
-        return Copy(title, url, context, notice, lines=lines)
+        return Copy(title, url, context, notice, lines=lines, **common)
     if event_type == "link.updated":
-        return Copy(title, url, context, notice, changes=_updated_changes(payload))
+        return Copy(
+            title, url, context, notice, changes=_updated_changes(payload), **common
+        )
     if event_type in ("link.created", "link.deleted", "link.expired"):
         return Copy(
             title,
@@ -261,8 +333,9 @@ def build_copy(event_type: str, timestamp: str, payload: dict[str, Any]) -> Copy
             context,
             notice,
             pairs=_lifecycle_pairs(event_type, payload, timestamp),
+            **common,
         )
 
     shown = {k: v for k, v in payload.items() if k != "dropped_since_last"}
     code = clip(json.dumps(shown, separators=(",", ":"), default=str), _CODE_MAX)
-    return Copy(title, url, context, notice, code=code)
+    return Copy(title, url, context, notice, code=code, **common)

@@ -11,7 +11,7 @@ from typing import Any
 from schemas.enums.webhook import WebhookFlavor
 from services.webhooks.registry import EVENT_REGISTRY, TEST_EVENT_SPEC
 from services.webhooks.renderers import default_renderers
-from services.webhooks.renderers.discord import _EMBED_TOTAL_MAX, DiscordRenderer
+from services.webhooks.renderers.discord import DiscordRenderer
 from services.webhooks.renderers.slack import SlackRenderer
 
 _TS = "2026-07-24T14:32:00+00:00"
@@ -45,33 +45,41 @@ class TestRegistry:
 
 
 class TestDiscord:
-    def test_clicked_renders_a_two_column_grid(self):
+    """Components V2: one accent container, heading, divider, substance,
+    small-text localized footer. Never embeds, never pings."""
+
+    def _container(self, doc):
+        assert doc["flags"] == 32768
+        assert doc["allowed_mentions"] == {"parse": []}
+        assert "embeds" not in doc and "content" not in doc
+        (container,) = doc["components"]
+        assert container["type"] == 17
+        return container
+
+    def _texts(self, container):
+        return [c["content"] for c in container["components"] if c["type"] == 10]
+
+    def test_clicked_message_shape(self):
         doc = _discord("link.clicked", _clicked_payload())
         assert doc["username"] == "spoo.me"
         assert doc["avatar_url"].startswith("https://spoo.me/")
-        (embed,) = doc["embeds"]
-        assert embed["title"] == "Click: spoo.me/summer-drop"
-        assert embed["url"] == "https://spoo.me/summer-drop"
-        assert embed["timestamp"] == _TS
-        fields = {f["name"]: f["value"] for f in embed["fields"]}
-        assert fields["Country"] == "🇮🇳 IN"
-        assert fields["City"] == "Mumbai"
-        assert fields["Browser"] == "Chrome"
-        assert fields["OS"] == "Android"
-        assert fields["Device"] == "mobile"
-        assert fields["From"] == "x.com"
-        assert fields["UTM"] == "newsletter / email"
-        assert fields["Clicks so far"] == "4,102"
-        assert all(f["inline"] for f in embed["fields"])
-        # Spacer fields close each pair so rows hold two facts, not three.
-        assert "\u200b" in fields
-        # The webhook identity carries the brand; no footer without a notice.
-        assert "footer" not in embed
-        assert "·" not in json.dumps(embed, ensure_ascii=False)
+        container = self._container(doc)
+        texts = self._texts(container)
+        assert texts[0] == (
+            "### Click  [spoo.me/summer-drop](https://spoo.me/summer-drop)"
+        )
+        body = texts[1]
+        assert "🇮🇳 **IN**  Mumbai" in body
+        assert "Chrome on Android, mobile" in body
+        assert "from **x.com**  (newsletter / email)" in body
+        footer = texts[-1]
+        assert footer.startswith("-# click 4,102")
+        assert "<t:" in footer and footer.rstrip().endswith(":R>")
+        # A divider separates the heading from the substance.
+        assert any(c["type"] == 14 and c["divider"] for c in container["components"])
+        assert "·" not in json.dumps(doc, ensure_ascii=False)
 
     def test_sparse_click_is_never_an_empty_card(self):
-        # A local/direct click has no geo and no referrer; the truth still
-        # renders: a direct visit, count stated even at zero.
         doc = _discord(
             "link.clicked",
             _clicked_payload(
@@ -82,109 +90,100 @@ class TestDiscord:
                 total_clicks=0,
             ),
         )
-        fields = {f["name"]: f["value"] for f in doc["embeds"][0]["fields"]}
-        assert "Country" not in fields
-        assert "City" not in fields
-        assert fields["From"] == "direct"
-        assert fields["Browser"] == "Chrome"
-        assert fields["Clicks so far"] == "0"
+        texts = self._texts(self._container(doc))
+        assert "Chrome on Android, mobile" in texts[1]
+        assert "direct visit" in texts[1]
+        assert texts[-1].startswith("-# click 0")
 
-    def test_clicked_bot_field(self):
+    def test_clicked_bot_line(self):
         doc = _discord(
             "link.clicked", _clicked_payload(is_bot=True, bot_name="GoogleBot")
         )
-        fields = {f["name"]: f["value"] for f in doc["embeds"][0]["fields"]}
-        assert fields["Bot"] == "GoogleBot"
+        texts = self._texts(self._container(doc))
+        assert "bot  **GoogleBot**" in texts[1]
 
     def test_dropped_notice_rides_the_footer(self):
         doc = _discord("link.clicked", _clicked_payload(dropped_since_last=3))
-        assert doc["embeds"][0]["footer"]["text"] == "3 earlier deliveries dropped"
+        footer = self._texts(self._container(doc))[-1]
+        assert "-# 3 earlier deliveries dropped" in footer
 
     def test_updated_renders_a_diff_block(self):
         payload = EVENT_REGISTRY["link.updated"].sample()
         payload["changes"]["max_clicks"] = {"old": 5000, "new": 10000}
-        description = _discord("link.updated", payload)["embeds"][0]["description"]
-        assert description.startswith("```diff\n")
-        assert description.endswith("\n```")
-        assert "- long_url: https://example.com/old" in description
-        assert "+ long_url: https://example.com/campaign" in description
-        assert "- max_clicks: 5000" in description
-        assert "+ max_clicks: 10000" in description
+        texts = self._texts(self._container(_discord("link.updated", payload)))
+        diff = next(t for t in texts if t.startswith("```diff"))
+        assert "- long_url: https://example.com/old" in diff
+        assert "+ long_url: https://example.com/campaign" in diff
+        assert "- max_clicks: 5000" in diff
+        assert "+ max_clicks: 10000" in diff
 
     def test_diff_values_cannot_break_out_of_the_block(self):
         payload = {
             "link": {"alias": "a", "domain": "spoo.me"},
             "changes": {"long_url": {"old": "x", "new": "```@everyone"}},
         }
-        description = _discord("link.updated", payload)["embeds"][0]["description"]
-        assert description.count("```") == 2  # only the fence itself
+        texts = self._texts(self._container(_discord("link.updated", payload)))
+        diff = next(t for t in texts if t.startswith("```diff"))
+        assert diff.count("```") == 2  # only the fence itself
 
-    def test_lifecycle_field_grids(self):
-        (embed,) = _discord("link.expired", EVENT_REGISTRY["link.expired"].sample())[
-            "embeds"
-        ]
-        fields = {f["name"]: f["value"] for f in embed["fields"]}
-        assert fields["Reason"] == "Max clicks reached"
-        assert "Destination" in fields
-        assert "Lifetime clicks" in fields
-
-        (embed,) = _discord("link.deleted", EVENT_REGISTRY["link.deleted"].sample())[
-            "embeds"
-        ]
-        fields = {f["name"]: f["value"] for f in embed["fields"]}
-        assert fields["Lifetime clicks"] == "4,102"
-        assert "days" in fields["Age"]
-
-    def test_bare_created_link_still_fills_the_card(self):
-        # Every configuration fact renders with its real answer, absent
-        # settings included.
+    def test_created_states_the_full_configuration(self):
         payload = {"link": {**EVENT_REGISTRY["link.created"].sample()["link"]}}
         payload["link"]["expires_at"] = None
         payload["link"]["max_clicks"] = None
-        fields = {
-            f["name"]: f["value"]
-            for f in _discord("link.created", payload)["embeds"][0]["fields"]
-        }
-        assert fields["Expires"] == "never"
-        assert fields["Max clicks"] == "unlimited"
-        assert fields["Password"] == "none"
-        assert fields["Bots"] == "allowed"
-        assert fields["Meta tags"] == "default"
-        assert fields["Geo targeting"] == "none"
+        container = self._container(_discord("link.created", payload))
+        texts = self._texts(container)
+        # Destination rides as a small subtitle under the heading.
+        assert texts[1] == "-# https://example.com/campaign"
+        facts = texts[2]
+        assert "**Expires**  never" in facts
+        assert "**Max clicks**  unlimited" in facts
+        assert "**Password**  none" in facts
+        assert "**Bots**  allowed" in facts
+        assert "**Meta tags**  default" in facts
+        assert "**Geo targeting**  none" in facts
+        assert container["accent_color"] == 0x43B581
 
-    def test_destination_field_is_full_width(self):
-        (embed,) = _discord("link.created", EVENT_REGISTRY["link.created"].sample())[
-            "embeds"
-        ]
-        by_name = {f["name"]: f for f in embed["fields"]}
-        assert by_name["Destination"]["inline"] is False
-        assert by_name["Expires"]["inline"] is True
+    def test_deleted_heading_is_not_a_link(self):
+        texts = self._texts(
+            self._container(
+                _discord("link.deleted", EVENT_REGISTRY["link.deleted"].sample())
+            )
+        )
+        assert texts[0] == "### Link deleted  spoo.me/summer-drop"
+        assert "**Lifetime clicks**  4,102" in texts[2]
+        assert "**Age**" in texts[2]
 
     def test_test_event_renders_its_message(self):
-        (embed,) = _discord("webhook.test", TEST_EVENT_SPEC.sample())["embeds"]
-        assert embed["description"] == "If you can read this, your endpoint works."
+        texts = self._texts(
+            self._container(_discord("webhook.test", TEST_EVENT_SPEC.sample()))
+        )
+        assert "If you can read this, your endpoint works." in texts
 
     def test_unknown_event_type_falls_back_to_json(self):
         # A future registry addition must degrade, never terminal-fail.
-        (embed,) = _discord("link.blocked", {"link_id": "x", "reason": "phishing"})[
-            "embeds"
-        ]
-        assert embed["title"] == "link.blocked"
-        assert embed["description"].startswith("```json\n")
-        assert '"reason":"phishing"' in embed["description"]
+        texts = self._texts(
+            self._container(
+                _discord("link.blocked", {"link_id": "x", "reason": "phishing"})
+            )
+        )
+        assert texts[0] == "### link.blocked"
+        code = next(t for t in texts if t.startswith("```json"))
+        assert '"reason":"phishing"' in code
 
-    def test_receiver_limits_hold_under_pathological_changes(self):
+    def test_text_budget_holds_under_pathological_changes(self):
         payload = {
             "link": {"alias": "a" * 500, "domain": "spoo.me"},
             "changes": {
                 f"field_{i}": {"old": "x" * 900, "new": "y" * 900} for i in range(10)
             },
         }
-        (embed,) = _discord("link.updated", payload)["embeds"]
-        assert len(embed["title"]) <= 256
-        assert len(embed["description"]) <= 4096
-        total = len(embed["title"]) + len(embed["description"])
-        assert total <= _EMBED_TOTAL_MAX
+        container = self._container(_discord("link.updated", payload))
+        total = sum(len(t) for t in self._texts(container))
+        assert total <= 3_500
+        assert len(container["components"]) <= 40
+
+    def test_delivery_url_query_declared(self):
+        assert DiscordRenderer.url_query == {"with_components": "true"}
 
 
 class TestSlack:

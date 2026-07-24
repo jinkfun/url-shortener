@@ -14,6 +14,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 
 from infrastructure.crypto import decrypt_secret
 from infrastructure.logging import get_logger
@@ -152,7 +153,7 @@ class DeliveryExecutor:
 
         started = time.monotonic()
         result = await post_public(
-            endpoint.url,
+            self._delivery_url(endpoint),
             body,
             headers=headers,
             timeout=self._timeout,
@@ -255,6 +256,17 @@ class DeliveryExecutor:
         )
 
     # ── Internals ────────────────────────────────────────────────────────
+
+    def _delivery_url(self, endpoint: WebhookEndpointDoc) -> str:
+        """Endpoint URL plus any query params the flavor's renderer
+        declares (Discord's components-v2 bodies need
+        ``with_components=true``). The signature covers the body alone,
+        so delivery mechanics can ride the URL."""
+        renderer = self._renderers.get(endpoint.flavor.value)
+        query = getattr(renderer, "url_query", None)
+        if not query:
+            return endpoint.url
+        return endpoint.url + ("&" if "?" in endpoint.url else "?") + urlencode(query)
 
     async def _render(
         self, row: WebhookDeliveryDoc, endpoint: WebhookEndpointDoc
