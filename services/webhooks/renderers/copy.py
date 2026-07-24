@@ -97,7 +97,7 @@ def _title(event_type: str, link: dict[str, Any]) -> str:
     label = EVENT_LABELS.get(event_type, event_type)
     alias, domain = link.get("alias"), link.get("domain")
     if _present(alias) and _present(domain):
-        return f"{label} · {domain}/{alias}"
+        return f"{label}: {domain}/{alias}"
     return label
 
 
@@ -128,29 +128,40 @@ def _age_days(created_at: Any, occurred_at: str) -> int | None:
         return None
 
 
+def _country_display(code: Any) -> str:
+    """ISO alpha-2 → flag emoji + code; anything else passes through."""
+    text = str(code)
+    if len(text) == 2 and text.isascii() and text.isalpha():
+        upper = text.upper()
+        flag = "".join(chr(0x1F1E6 + ord(c) - 65) for c in upper)
+        return f"{flag} {upper}"
+    return text
+
+
 def _clicked_pairs(payload: dict[str, Any]) -> list[tuple[str, str]]:
-    """A click always renders at least Device and From — absent analytics
-    dimensions are skipped, but a referrer-less click IS a direct visit
-    and renders as one, never as an empty card."""
+    """One field per dimension — the airy grid IS the point. Absent
+    analytics dimensions are skipped, but a referrer-less click IS a
+    direct visit and the running count is always stated, so a card is
+    never empty."""
     pairs: list[tuple[str, str]] = []
 
-    place = [
-        str(v) for v in (payload.get("city"), payload.get("country")) if _present(v)
-    ]
-    if place:
-        pairs.append(("Location", ", ".join(place)))
-
-    agent = " · ".join(
-        str(payload[k]) for k in ("browser", "os", "device") if _present(payload.get(k))
-    )
-    pairs.append(("Device", agent or "not detected"))
+    if _present(payload.get("country")):
+        pairs.append(("Country", _country_display(payload["country"])))
+    if _present(payload.get("city")):
+        pairs.append(("City", str(payload["city"])))
+    if _present(payload.get("browser")):
+        pairs.append(("Browser", str(payload["browser"])))
+    if _present(payload.get("os")):
+        pairs.append(("OS", str(payload["os"])))
+    if _present(payload.get("device")):
+        pairs.append(("Device", str(payload["device"])))
 
     referrer = payload.get("referrer")
     pairs.append(("From", _referrer_host(referrer) if _present(referrer) else "direct"))
 
     utm = payload.get("utm")
     if isinstance(utm, dict):
-        campaign = " · ".join(str(v) for v in utm.values() if _present(v))
+        campaign = " / ".join(str(v) for v in utm.values() if _present(v))
         if campaign:
             pairs.append(("UTM", campaign))
 
@@ -159,8 +170,9 @@ def _clicked_pairs(payload: dict[str, Any]) -> list[tuple[str, str]]:
         pairs.append(("Bot", str(bot) if _present(bot) else "detected"))
 
     total = payload.get("total_clicks")
-    if isinstance(total, int) and total > 0:
-        pairs.append(("Clicks", f"{total:,}"))
+    if isinstance(total, int):
+        # Count at click time — the payload snapshot precedes the increment.
+        pairs.append(("Clicks so far", f"{total:,}"))
 
     return [(name, clip(value, _VALUE_MAX)) for name, value in pairs]
 
@@ -202,10 +214,20 @@ def _lifecycle_pairs(
                 f"{max_clicks:,}" if isinstance(max_clicks, int) else "unlimited",
             )
         )
-        if link.get("password_protected"):
-            pairs.append(("Password", "protected"))
-        if link.get("block_bots"):
-            pairs.append(("Bots", "blocked"))
+        pairs.append(
+            ("Password", "protected" if link.get("password_protected") else "none")
+        )
+        pairs.append(("Bots", "blocked" if link.get("block_bots") else "allowed"))
+        pairs.append(("Meta tags", "custom" if link.get("meta_tags") else "default"))
+        geo = link.get("geo_rules")
+        pairs.append(
+            (
+                "Geo targeting",
+                f"{len(geo)} {'rule' if len(geo) == 1 else 'rules'}"
+                if isinstance(geo, dict) and geo
+                else "none",
+            )
+        )
 
     if event_type in ("link.deleted", "link.expired") and isinstance(total, int):
         pairs.append(("Lifetime clicks", f"{total:,}"))

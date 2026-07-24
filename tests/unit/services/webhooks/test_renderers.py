@@ -45,26 +45,33 @@ class TestRegistry:
 
 
 class TestDiscord:
-    def test_clicked_renders_an_inline_field_grid(self):
+    def test_clicked_renders_a_two_column_grid(self):
         doc = _discord("link.clicked", _clicked_payload())
         assert doc["username"] == "spoo.me"
+        assert doc["avatar_url"].startswith("https://spoo.me/")
         (embed,) = doc["embeds"]
-        assert embed["title"] == "Click · spoo.me/summer-drop"
+        assert embed["title"] == "Click: spoo.me/summer-drop"
         assert embed["url"] == "https://spoo.me/summer-drop"
         assert embed["timestamp"] == _TS
         fields = {f["name"]: f["value"] for f in embed["fields"]}
-        assert fields["Location"] == "Mumbai, IN"
-        assert fields["Device"] == "Chrome · Android · mobile"
+        assert fields["Country"] == "🇮🇳 IN"
+        assert fields["City"] == "Mumbai"
+        assert fields["Browser"] == "Chrome"
+        assert fields["OS"] == "Android"
+        assert fields["Device"] == "mobile"
         assert fields["From"] == "x.com"
-        assert fields["UTM"] == "newsletter · email"
-        assert fields["Clicks"] == "4,102"
+        assert fields["UTM"] == "newsletter / email"
+        assert fields["Clicks so far"] == "4,102"
         assert all(f["inline"] for f in embed["fields"])
-        # Discord renders the embed timestamp itself; footer is brand only.
-        assert embed["footer"]["text"] == "spoo.me"
+        # Spacer fields close each pair so rows hold two facts, not three.
+        assert "\u200b" in fields
+        # The webhook identity carries the brand; no footer without a notice.
+        assert "footer" not in embed
+        assert "·" not in json.dumps(embed, ensure_ascii=False)
 
     def test_sparse_click_is_never_an_empty_card(self):
-        # A local/direct click has no geo and no referrer; it still carries
-        # Device and shows the truth: a direct visit.
+        # A local/direct click has no geo and no referrer; the truth still
+        # renders: a direct visit, count stated even at zero.
         doc = _discord(
             "link.clicked",
             _clicked_payload(
@@ -76,10 +83,11 @@ class TestDiscord:
             ),
         )
         fields = {f["name"]: f["value"] for f in doc["embeds"][0]["fields"]}
-        assert "Location" not in fields
-        assert "Clicks" not in fields
+        assert "Country" not in fields
+        assert "City" not in fields
         assert fields["From"] == "direct"
-        assert fields["Device"] == "Chrome · Android · mobile"
+        assert fields["Browser"] == "Chrome"
+        assert fields["Clicks so far"] == "0"
 
     def test_clicked_bot_field(self):
         doc = _discord(
@@ -90,9 +98,7 @@ class TestDiscord:
 
     def test_dropped_notice_rides_the_footer(self):
         doc = _discord("link.clicked", _clicked_payload(dropped_since_last=3))
-        assert doc["embeds"][0]["footer"]["text"] == (
-            "spoo.me · 3 earlier deliveries dropped"
-        )
+        assert doc["embeds"][0]["footer"]["text"] == "3 earlier deliveries dropped"
 
     def test_updated_renders_a_diff_block(self):
         payload = EVENT_REGISTRY["link.updated"].sample()
@@ -117,9 +123,10 @@ class TestDiscord:
         (embed,) = _discord("link.expired", EVENT_REGISTRY["link.expired"].sample())[
             "embeds"
         ]
-        names = [f["name"] for f in embed["fields"]]
-        assert names == ["Reason", "Destination", "Lifetime clicks"]
-        assert embed["fields"][0]["value"] == "Max clicks reached"
+        fields = {f["name"]: f["value"] for f in embed["fields"]}
+        assert fields["Reason"] == "Max clicks reached"
+        assert "Destination" in fields
+        assert "Lifetime clicks" in fields
 
         (embed,) = _discord("link.deleted", EVENT_REGISTRY["link.deleted"].sample())[
             "embeds"
@@ -129,7 +136,8 @@ class TestDiscord:
         assert "days" in fields["Age"]
 
     def test_bare_created_link_still_fills_the_card(self):
-        # No expiry and no cap are answers, not blanks.
+        # Every configuration fact renders with its real answer, absent
+        # settings included.
         payload = {"link": {**EVENT_REGISTRY["link.created"].sample()["link"]}}
         payload["link"]["expires_at"] = None
         payload["link"]["max_clicks"] = None
@@ -139,6 +147,10 @@ class TestDiscord:
         }
         assert fields["Expires"] == "never"
         assert fields["Max clicks"] == "unlimited"
+        assert fields["Password"] == "none"
+        assert fields["Bots"] == "allowed"
+        assert fields["Meta tags"] == "default"
+        assert fields["Geo targeting"] == "none"
 
     def test_destination_field_is_full_width(self):
         (embed,) = _discord("link.created", EVENT_REGISTRY["link.created"].sample())[
@@ -171,25 +183,21 @@ class TestDiscord:
         (embed,) = _discord("link.updated", payload)["embeds"]
         assert len(embed["title"]) <= 256
         assert len(embed["description"]) <= 4096
-        total = (
-            len(embed["title"])
-            + len(embed["description"])
-            + len(embed["footer"]["text"])
-        )
+        total = len(embed["title"]) + len(embed["description"])
         assert total <= _EMBED_TOTAL_MAX
 
 
 class TestSlack:
     def test_clicked_is_title_fields_context(self):
         doc = _slack("link.clicked", _clicked_payload())
-        assert doc["text"] == "Click · spoo.me/summer-drop"
+        assert doc["text"] == "Click: spoo.me/summer-drop"
         first, last = doc["blocks"][0], doc["blocks"][-1]
         assert first["type"] == "section"
         assert first["text"]["text"].startswith(
-            "*<https://spoo.me/summer-drop|Click · spoo.me/summer-drop>*"
+            "*<https://spoo.me/summer-drop|Click: spoo.me/summer-drop>*"
         )
         fields = [f["text"] for f in doc["blocks"][1]["fields"]]
-        assert "*Location*\nMumbai, IN" in fields
+        assert "*Country*\n🇮🇳 IN" in fields
         assert "*From*\nx.com" in fields
         assert last["type"] == "context"
         assert last["elements"][0]["text"] == f"spoo.me · {_TS}"

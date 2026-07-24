@@ -23,6 +23,8 @@ _COLORS = {
 }
 _DEFAULT_COLOR = 0x99AAB5
 
+AVATAR_URL = "https://spoo.me/static/images/favicon.png"
+
 _TITLE_MAX = 256
 _DESCRIPTION_MAX = 4096
 _FIELD_NAME_MAX = 256
@@ -52,15 +54,16 @@ class DiscordRenderer:
     ) -> str:
         copy = build_copy(event_type, timestamp, payload)
 
-        # Discord renders the embed timestamp natively, so the footer skips
-        # the time (unlike Slack's context line).
-        footer = "spoo.me" + (f" · {copy.notice}" if copy.notice else "")
+        # The webhook's own username and avatar carry the brand, and the
+        # embed timestamp renders natively in the viewer's timezone — the
+        # footer exists only for the drop notice.
         embed: dict[str, Any] = {
             "title": clip(copy.title, _TITLE_MAX),
             "color": _COLORS.get(event_type, _DEFAULT_COLOR),
             "timestamp": timestamp,
-            "footer": {"text": clip(footer, _FOOTER_MAX)},
         }
+        if copy.notice:
+            embed["footer"] = {"text": clip(copy.notice, _FOOTER_MAX)}
         if copy.title_url:
             embed["url"] = copy.title_url
 
@@ -82,16 +85,33 @@ class DiscordRenderer:
             embed["description"] = clip("\n".join(copy.lines), _DESCRIPTION_MAX)
 
         if copy.pairs:
-            # Short facts sit side by side (Discord flows three per row);
-            # long values like destination URLs take the full width.
-            embed["fields"] = [
-                {
-                    "name": clip(name, _FIELD_NAME_MAX),
-                    "value": clip(value, _FIELD_VALUE_MAX),
-                    "inline": name != "Destination" and len(value) <= 32,
-                }
-                for name, value in copy.pairs
-            ]
+            # Two facts per row, never Discord's cramped three: a blank
+            # spacer field closes each pair so the grid stays airy. Long
+            # values like destination URLs take the full width up top.
+            fields: list[dict[str, Any]] = []
+            grid: list[tuple[str, str]] = []
+            for name, value in copy.pairs:
+                if name == "Destination" or len(value) > 32:
+                    fields.append(
+                        {
+                            "name": clip(name, _FIELD_NAME_MAX),
+                            "value": clip(value, _FIELD_VALUE_MAX),
+                            "inline": False,
+                        }
+                    )
+                else:
+                    grid.append((name, value))
+            for i, (name, value) in enumerate(grid):
+                fields.append(
+                    {
+                        "name": clip(name, _FIELD_NAME_MAX),
+                        "value": clip(value, _FIELD_VALUE_MAX),
+                        "inline": True,
+                    }
+                )
+                if i % 2 == 1 and i < len(grid) - 1:
+                    fields.append({"name": "\u200b", "value": "\u200b", "inline": True})
+            embed["fields"] = fields
 
         while _embed_size(embed) > _EMBED_TOTAL_MAX and embed.get("fields"):
             embed["fields"].pop()
@@ -102,7 +122,7 @@ class DiscordRenderer:
             )
 
         return json.dumps(
-            {"username": "spoo.me", "embeds": [embed]},
+            {"username": "spoo.me", "avatar_url": AVATAR_URL, "embeds": [embed]},
             separators=(",", ":"),
             default=str,
         )

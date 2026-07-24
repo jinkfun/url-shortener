@@ -273,8 +273,14 @@ class DeliveryExecutor:
         payload = dict(event.payload)
         if row.dropped_since_last:
             payload["dropped_since_last"] = row.dropped_since_last
+        # Mongo returns naive datetimes; the wire timestamp must carry its
+        # UTC offset or consumers (and Discord's local-time rendering)
+        # can't place it.
         body = renderer.render(
-            event.event_id, event.type, event.occurred_at.isoformat(), payload
+            event.event_id,
+            event.type,
+            as_aware_utc(event.occurred_at).isoformat(),
+            payload,
         )
         if len(body.encode()) > self._max_bytes:
             await self._deliveries.mark_failed(row.id, "payload_over_cap")
