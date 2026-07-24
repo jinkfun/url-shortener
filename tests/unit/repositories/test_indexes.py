@@ -27,6 +27,9 @@ class TestEnsureIndexes:
         custom_domains_col = AsyncMock()
         reports_col = AsyncMock()
         report_submissions_col = AsyncMock()
+        webhook_events_col = AsyncMock()
+        webhook_endpoints_col = AsyncMock()
+        webhook_deliveries_col = AsyncMock()
 
         db.__getitem__ = lambda self, name: {
             "users": users_col,
@@ -40,6 +43,9 @@ class TestEnsureIndexes:
             "custom_domains": custom_domains_col,
             "reports": reports_col,
             "report_submissions": report_submissions_col,
+            "webhook-events": webhook_events_col,
+            "webhook-endpoints": webhook_endpoints_col,
+            "webhook-deliveries": webhook_deliveries_col,
         }[name]
 
         # create_collection raises CollectionInvalid when collection already exists
@@ -58,6 +64,20 @@ class TestEnsureIndexes:
             [("domain", 1), ("alias", 1)], unique=True
         )
         urls_v2_col.drop_index.assert_any_await("alias_1")
+        # Webhooks: the claim index and the coupled TTL pair.
+        webhook_deliveries_col.create_index.assert_any_await(
+            [("status", 1), ("next_attempt_at", 1)], name="ix_claim"
+        )
+        webhook_deliveries_col.create_index.assert_any_await(
+            [("webhook_id", 1)], unique=True
+        )
+        webhook_events_col.create_index.assert_any_await([("event_id", 1)], unique=True)
+        webhook_events_col.create_index.assert_any_await(
+            [("created_at", 1)], expireAfterSeconds=2_592_000, name="ttl_created_at"
+        )
+        webhook_deliveries_col.create_index.assert_any_await(
+            [("created_at", 1)], expireAfterSeconds=2_592_000, name="ttl_created_at"
+        )
         urls_v2_col.create_index.assert_any_await([("owner_id", 1)])
         clicks_col.create_index.assert_any_await(
             [("meta.url_id", 1), ("clicked_at", -1)]

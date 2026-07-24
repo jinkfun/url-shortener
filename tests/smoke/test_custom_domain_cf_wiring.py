@@ -40,6 +40,9 @@ def _wire(custom_domains: CustomDomainSettings):
         "blocked_domains": MagicMock(name="blocked_domains"),
         "reports": MagicMock(name="reports"),
         "report_submissions": MagicMock(name="report_submissions"),
+        "webhook-events": MagicMock(name="webhook-events"),
+        "webhook-endpoints": MagicMock(name="webhook-endpoints"),
+        "webhook-deliveries": MagicMock(name="webhook-deliveries"),
     }
     app.state.http_client = MagicMock()
     app.state.geoip = MagicMock()

@@ -39,6 +39,9 @@ from repositories.report_repository import (
 from repositories.token_repository import TokenRepository
 from repositories.url_repository import UrlRepository
 from repositories.user_repository import UserRepository
+from repositories.webhook_delivery_repository import WebhookDeliveryRepository
+from repositories.webhook_endpoint_repository import WebhookEndpointRepository
+from repositories.webhook_event_repository import WebhookEventRepository
 from schemas.enums.domain_status import VerificationMethod
 from services.api_key_service import ApiKeyService
 from services.auth.credentials import CredentialService
@@ -53,6 +56,11 @@ from services.click.sinks import InlineSink, RedisStreamSink
 from services.contact_service import ContactService
 from services.custom_domain_service import CustomDomainService
 from services.edge_cache.og_writethrough import OgEdgeWritethrough
+from services.events.sinks import (
+    InlineDomainEventSink,
+    NullDomainEventSink,
+    StreamDomainEventSink,
+)
 from services.export.formatters import default_formatters
 from services.export.service import ExportService
 from services.feature_flag_service import FeatureFlagService
@@ -69,6 +77,15 @@ from services.stats_service import StatsService
 from services.tenant_resolver import CachedMongoTenantResolver
 from services.token_factory import TokenFactory
 from services.url_service import UrlService
+from services.webhooks import (
+    DeliveryExecutor,
+    OwnerSubscriptionCache,
+    SubscriptionMatcher,
+    WebhookDispatcher,
+    WebhookService,
+)
+from services.webhooks.consumers import WebhookFanoutClickSink
+from services.webhooks.renderers import default_renderers
 
 log = get_logger(__name__)
 
@@ -80,16 +97,18 @@ def build_click_service(
     emoji_repo: EmojiUrlRepository,
     geoip,
     url_cache: UrlCache,
+    events=None,
 ) -> ClickService:
     """Compose the click pipeline (schema handler registry).
 
     Single source of truth for the schema→handler mapping, shared by the
     web app (inline sink) and the click worker (stats consumer) so both
-    processes always run identical tracking logic.
+    processes always run identical tracking logic. ``events`` is the
+    domain-event sink for link.expired (max-clicks branch); None = off.
     """
     return ClickService(
         {
-            "v2": V2ClickHandler(click_repo, url_repo, geoip, url_cache),
+            "v2": V2ClickHandler(click_repo, url_repo, geoip, url_cache, events=events),
             "v1": LegacyClickHandler(legacy_repo, emoji_repo, geoip),
         }
     )
@@ -199,6 +218,70 @@ def wire_services(app: FastAPI, settings: AppSettings, redis_client) -> None:
     else:
         meta_image_sink = NullMetaImageSink()
 
+    # ── Webhooks system ──────────────────────────────────────────────
+    # Built BEFORE the services so producers receive the sink at
+    # construction. Transport degrades with available infrastructure:
+    # queue Redis present → stream sink (the click worker consumes),
+    # absent → inline dispatch at emit time. The delivery executor is
+    # Mongo-only and runs embedded in this process when the runtime
+    # resolves to "embedded" (see app.py lifespan).
+    wh_settings = settings.webhooks
+    queue_redis_for_webhooks = getattr(app.state, "queue_redis", None)
+    webhook_event_repo = WebhookEventRepository(db["webhook-events"])
+    webhook_endpoint_repo = WebhookEndpointRepository(db["webhook-endpoints"])
+    webhook_delivery_repo = WebhookDeliveryRepository(db["webhook-deliveries"])
+    webhook_owner_cache = OwnerSubscriptionCache(
+        redis_client, ttl_seconds=wh_settings.matcher_cache_ttl_seconds
+    )
+    webhook_dispatcher = WebhookDispatcher(
+        SubscriptionMatcher(webhook_endpoint_repo, webhook_owner_cache),
+        webhook_event_repo,
+        webhook_delivery_repo,
+        webhook_endpoint_repo,
+        max_pending_per_endpoint=wh_settings.max_pending_per_endpoint,
+    )
+    webhook_executor = DeliveryExecutor(
+        webhook_delivery_repo,
+        webhook_endpoint_repo,
+        webhook_event_repo,
+        default_renderers(),
+        master_secret=settings.secret_key,
+        delivery_timeout=wh_settings.delivery_timeout_seconds,
+        max_payload_bytes=wh_settings.max_payload_bytes,
+        max_consecutive_failures=wh_settings.max_consecutive_failures,
+        poll_interval=wh_settings.executor_poll_seconds,
+        lease_seconds=wh_settings.executor_lease_seconds,
+    )
+    if not wh_settings.enabled:
+        app.state.domain_event_sink = NullDomainEventSink()
+    elif queue_redis_for_webhooks is not None:
+        app.state.domain_event_sink = StreamDomainEventSink(
+            queue_redis_for_webhooks,
+            fallback=InlineDomainEventSink(webhook_dispatcher),
+            maxlen=wh_settings.domain_stream_maxlen,
+        )
+        log.info("webhooks_stream_sink_enabled")
+    else:
+        app.state.domain_event_sink = InlineDomainEventSink(webhook_dispatcher)
+        log.info("webhooks_inline_sink_enabled")
+    # Embedded runtime: the executor lives in this process when webhooks
+    # are on and either explicitly requested or (auto) no worker consumes —
+    # i.e. the inline rung. app.py starts/cancels the task.
+    app.state.webhook_executor = webhook_executor
+    app.state.webhook_executor_embedded = wh_settings.enabled and (
+        wh_settings.runtime == "embedded"
+        or (wh_settings.runtime == "auto" and queue_redis_for_webhooks is None)
+    )
+    app.state.webhook_service = WebhookService(
+        webhook_endpoint_repo,
+        webhook_delivery_repo,
+        webhook_event_repo,
+        webhook_executor,
+        webhook_owner_cache,
+        master_secret=settings.secret_key,
+        max_endpoints=wh_settings.max_endpoints,
+    )
+
     # ── Services ─────────────────────────────────────────────────────────
     app.state.url_service = UrlService(
         url_repo,
@@ -220,6 +303,7 @@ def wire_services(app: FastAPI, settings: AppSettings, redis_client) -> None:
         meta_image_max_bytes=r2.upload_max_bytes,
         meta_image_sink=meta_image_sink,
         meta_key_secret=settings.secret_key,
+        events=app.state.domain_event_sink,
     )
     app.state.bulk_url_service = BulkUrlService(
         url_repo,
@@ -228,6 +312,7 @@ def wire_services(app: FastAPI, settings: AppSettings, redis_client) -> None:
         kv=edge_kv_client,
         system_default_domain=settings.system_default_domain,
         og_ttl_seconds=edge.og_ttl_seconds,
+        events=app.state.domain_event_sink,
     )
     app.state.stats_service = StatsService(
         click_repo,
@@ -321,7 +406,13 @@ def wire_services(app: FastAPI, settings: AppSettings, redis_client) -> None:
     )
 
     app.state.click_service = build_click_service(
-        click_repo, url_repo, legacy_repo, emoji_repo, app.state.geoip, url_cache
+        click_repo,
+        url_repo,
+        legacy_repo,
+        emoji_repo,
+        app.state.geoip,
+        url_cache,
+        events=app.state.domain_event_sink,
     )
 
     # ── Click event sink ─────────────────────────────────────────────
@@ -358,6 +449,20 @@ def wire_services(app: FastAPI, settings: AppSettings, redis_client) -> None:
     app.state.feature_flag_service = FeatureFlagService(
         feature_flag_repo, feature_flag_cache
     )
+
+    # Whenever clicks are tracked inline, link.clicked webhooks must fan
+    # out at emit time — the worker's stream group only sees clicks that
+    # ride the stream. Keying on the CLICK sink (not the domain sink)
+    # covers both the Mongo-only rung AND the queue-Redis-present-but-
+    # CLICK_EVENTS_SINK=inline combination, which would otherwise leave
+    # click webhooks silently unfired.
+    if wh_settings.enabled and isinstance(app.state.click_sink, InlineSink):
+        app.state.click_sink = WebhookFanoutClickSink(
+            app.state.click_sink,
+            webhook_dispatcher,
+            app.state.geoip,
+            settings.system_default_domain,
+        )
 
     # ── Custom-domains feature ───────────────────────────────────────
     # Wired unconditionally so the data plumbing is in place even when the

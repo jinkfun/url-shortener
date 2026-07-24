@@ -73,6 +73,7 @@ from dependencies.services import (
     UrlSvc,
     UserRepo,
     VerificationSvc,
+    WebhookSvc,
     fetch_user_profile,
     get_api_key_service,
     get_app_grant_repo,
@@ -94,6 +95,7 @@ from dependencies.services import (
     get_url_service,
     get_user_repo,
     get_verification_service,
+    get_webhook_service,
 )
 
 __all__ = [
@@ -141,6 +143,7 @@ __all__ = [
     "UserRepo",
     "VerificationSvc",
     "VerifiedUser",
+    "WebhookSvc",
     "check_api_key_scope",
     "check_credential_scopes",
     # services (getters)
@@ -175,6 +178,7 @@ __all__ = [
     "get_url_service",
     "get_user_repo",
     "get_verification_service",
+    "get_webhook_service",
     "optional_scopes",
     "optional_scopes_verified",
     "require_auth",

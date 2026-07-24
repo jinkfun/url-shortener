@@ -401,6 +401,50 @@ class MetaTagsSettings(BaseSettings):
     fetch_user_agent: str = "spoo.me-og-validator/1.0 (+https://spoo.me)"
 
 
+class WebhookSettings(BaseSettings):
+    """Webhooks system — real-time event deliveries to subscriber URLs.
+
+    Fully opt-in: ``enabled=False`` wires the NullSink and mounts nothing.
+    Fact transport rides the click pipeline's queue Redis when present and
+    degrades to inline dispatch without it; the delivery executor needs
+    only Mongo, so ``runtime`` chooses where it lives:
+
+      auto     — worker when the worker process mounts it, else embedded
+      worker   — only the click worker runs consumers + executor
+      embedded — the app process runs them as lifespan tasks
+      off      — dispatch still records nothing is running (dev/debug)
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+        env_prefix="WEBHOOKS_",
+    )
+
+    enabled: bool = False
+    runtime: Literal["auto", "worker", "embedded", "off"] = "auto"
+
+    max_endpoints: int = Field(default=5, ge=1)
+    delivery_timeout_seconds: float = Field(default=15.0, gt=0)
+    max_payload_bytes: int = Field(default=20_480, ge=1024)
+    max_consecutive_failures: int = Field(default=10, ge=1)
+    # Governs BOTH webhook-events and webhook-deliveries TTL indexes — a
+    # delivery must never outlive its event.
+    delivery_log_ttl_days: int = Field(default=30, ge=1)
+    # Dispatch-side pending cap per endpoint; beyond it deliveries are
+    # dropped-and-counted (surfaced as dropped_since_last).
+    max_pending_per_endpoint: int = Field(default=1000, ge=10)
+    executor_poll_seconds: float = Field(default=1.0, gt=0)
+    executor_lease_seconds: int = Field(default=60, ge=10)
+    # Owner→subscription-count cache in front of the matcher.
+    matcher_cache_ttl_seconds: int = Field(default=60, ge=5)
+    domain_stream_maxlen: int = Field(default=100_000, ge=1000)
+
+    @property
+    def delivery_log_ttl_seconds(self) -> int:
+        return self.delivery_log_ttl_days * 86_400
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -559,6 +603,7 @@ class AppSettings(BaseSettings):
     edge_cache: EdgeCacheSettings | None = None
     r2: R2StorageSettings | None = None
     meta_tags: MetaTagsSettings | None = None
+    webhooks: WebhookSettings | None = None
 
     @model_validator(mode="after")
     def _populate_sub_configs_and_secret(self) -> AppSettings:
@@ -598,6 +643,12 @@ class AppSettings(BaseSettings):
             self.r2 = R2StorageSettings()
         if self.meta_tags is None:
             self.meta_tags = MetaTagsSettings()
+        if self.webhooks is None:
+            self.webhooks = WebhookSettings()
+        if self.webhooks.enabled and not self.secret_key:
+            # Signing secrets are encrypted with a key derived from
+            # SECRET_KEY; an empty master would mean a predictable key.
+            raise ValueError("SECRET_KEY must be set when WEBHOOKS_ENABLED=true")
 
         # The DCV mock makes domain verification succeed unconditionally —
         # in production that would let anyone claim any domain. Refuse to

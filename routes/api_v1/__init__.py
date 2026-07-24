@@ -18,6 +18,7 @@ from routes.api_v1 import (
     shorten,
     stats,
     urls,
+    webhooks,
 )
 
 router = APIRouter(prefix="/api/v1")
@@ -36,3 +37,4 @@ router.include_router(metadata.router)
 router.include_router(me.router)
 router.include_router(public_preview.router)
 router.include_router(reports.router)
+router.include_router(webhooks.router)

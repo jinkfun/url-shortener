@@ -37,6 +37,7 @@ from services.public_stats_service import PublicStatsService
 from services.report_intake_service import ReportIntakeService
 from services.stats_service import StatsService
 from services.url_service import UrlService
+from services.webhooks.service import WebhookService
 
 
 def get_url_service(request: Request) -> UrlService:
@@ -139,6 +140,10 @@ def get_report_intake_service(request: Request) -> ReportIntakeService:
     return request.app.state.report_intake_service
 
 
+def get_webhook_service(request: Request) -> WebhookService:
+    return request.app.state.webhook_service
+
+
 # ── Annotated type aliases — Depends shortcuts for route signatures ──────────
 
 UrlSvc = Annotated[UrlService, Depends(get_url_service)]
@@ -165,3 +170,4 @@ FeatureFlagSvc = Annotated[FeatureFlagService, Depends(get_feature_flag_service)
 CustomDomainSvc = Annotated[CustomDomainService, Depends(get_custom_domain_service)]
 PublicPreviewSvc = Annotated[PublicPreviewService, Depends(get_public_preview_service)]
 ReportIntakeSvc = Annotated[ReportIntakeService, Depends(get_report_intake_service)]
+WebhookSvc = Annotated[WebhookService, Depends(get_webhook_service)]

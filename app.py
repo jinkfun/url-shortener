@@ -5,9 +5,10 @@ create_app() is the single entry point for building the app.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import redis.asyncio as aioredis
 import sentry_sdk
@@ -141,7 +142,10 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         )
 
         await ensure_system_default_domain(app.state.db, settings.system_default_domain)
-        await ensure_indexes(app.state.db)
+        await ensure_indexes(
+            app.state.db,
+            webhook_log_ttl_seconds=settings.webhooks.delivery_log_ttl_seconds,
+        )
 
         # App registry for the consent/apps system
         app.state.app_registry = load_app_registry()
@@ -191,9 +195,25 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                     detail="JWT_SECRET is shorter than 32 characters — consider using RS256 keys or a longer secret.",
                 )
 
+        # Embedded webhook delivery executor: the Mongo-only claim
+        # loop runs here when no worker consumes — inline-rung deployments
+        # keep retries/auto-disable without any extra process.
+        webhook_executor_task: asyncio.Task | None = None
+        if getattr(app.state, "webhook_executor_embedded", False):
+            webhook_executor_task = asyncio.create_task(
+                app.state.webhook_executor.run(), name="webhook-delivery-executor"
+            )
+            log.info("webhook_executor_embedded_started")
+
         yield
 
         # ── Shutdown ─────────────────────────────────────────────────────────
+        if webhook_executor_task is not None:
+            webhook_executor_task.cancel()
+            # Bounded: a delivery attempt mid-flight has a 15s HTTP timeout;
+            # don't let a pathological one hold the whole app shutdown.
+            with suppress(asyncio.CancelledError, asyncio.TimeoutError, TimeoutError):
+                await asyncio.wait_for(webhook_executor_task, timeout=10)
         await mongo_client.close()
         if redis_client is not None:
             await redis_client.aclose()

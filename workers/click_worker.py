@@ -57,6 +57,9 @@ from repositories.click_repository import ClickRepository
 from repositories.legacy.emoji_url_repository import EmojiUrlRepository
 from repositories.legacy.legacy_url_repository import LegacyUrlRepository
 from repositories.url_repository import UrlRepository
+from repositories.webhook_delivery_repository import WebhookDeliveryRepository
+from repositories.webhook_endpoint_repository import WebhookEndpointRepository
+from repositories.webhook_event_repository import WebhookEventRepository
 from services.click.consumers import (
     ClickConsumer,
     HotUrlDetector,
@@ -66,7 +69,17 @@ from services.click.consumers import (
 from services.click.consumers.hotness import HotUrlAction
 from services.edge_cache import PromoteToEdgeCacheAction
 from services.edge_cache.og_writethrough import OgEdgeWritethrough
+from services.events.contract import DOMAIN_EVENTS_STREAM
+from services.events.sinks import InlineDomainEventSink
 from services.meta_tags.validator import MetaImageValidator
+from services.webhooks import (
+    DeliveryExecutor,
+    OwnerSubscriptionCache,
+    SubscriptionMatcher,
+    WebhookDispatcher,
+)
+from services.webhooks.consumers import WebhookClickConsumer, WebhookDomainConsumer
+from services.webhooks.renderers import default_renderers
 from workers.dlq import ClaimDeadLetterGuard
 from workers.telemetry import StaleConsumerJanitor, StreamMetricsReporter
 
@@ -88,6 +101,7 @@ class _WorkerRuntime:
     telemetry_tasks: list[asyncio.Task] = field(default_factory=list)
     consumers: dict[str, ClickConsumer] = field(default_factory=dict)
     meta_validator: MetaImageValidator | None = None
+    webhook_domain_consumer: WebhookDomainConsumer | None = None
 
     async def aclose(self) -> None:
         for task in self.telemetry_tasks:
@@ -118,7 +132,11 @@ def enabled_groups(ce: ClickEventsSettings) -> list[str]:
 
 
 async def _build_runtime(
-    settings: AppSettings, groups: list[str], *, run_meta: bool = False
+    settings: AppSettings,
+    groups: list[str],
+    *,
+    run_meta: bool = False,
+    run_webhooks: bool = False,
 ) -> _WorkerRuntime:
     ce = settings.click_events
     mongo_client: AsyncMongoClient = AsyncMongoClient(
@@ -141,6 +159,53 @@ async def _build_runtime(
         counter_redis=None,
     )
 
+    # Built FIRST so the stats consumer can carry the sink (link.expired
+    # fires from its max-clicks branch). In-process dispatch — same process
+    # as the dispatcher, no re-queue round trip.
+    worker_domain_sink = None
+    if run_webhooks:
+        # Webhooks stack: dispatcher fed by two consumer-group
+        # feeds (clicks + domain events), executor as a background task —
+        # Mongo-only, so it shares this process without extra infra.
+        wh = settings.webhooks
+        webhook_event_repo = WebhookEventRepository(db["webhook-events"])
+        webhook_endpoint_repo = WebhookEndpointRepository(db["webhook-endpoints"])
+        webhook_delivery_repo = WebhookDeliveryRepository(db["webhook-deliveries"])
+        dispatcher = WebhookDispatcher(
+            SubscriptionMatcher(
+                webhook_endpoint_repo,
+                OwnerSubscriptionCache(
+                    cache_redis, ttl_seconds=wh.matcher_cache_ttl_seconds
+                ),
+            ),
+            webhook_event_repo,
+            webhook_delivery_repo,
+            webhook_endpoint_repo,
+            max_pending_per_endpoint=wh.max_pending_per_endpoint,
+        )
+        worker_domain_sink = InlineDomainEventSink(dispatcher)
+        webhook_geoip = GeoIPService(settings.geoip_country_db, settings.geoip_city_db)
+        runtime.consumers["webhooks"] = WebhookClickConsumer(
+            dispatcher, webhook_geoip, settings.system_default_domain
+        )
+        runtime.webhook_domain_consumer = WebhookDomainConsumer(dispatcher)
+        executor = DeliveryExecutor(
+            webhook_delivery_repo,
+            webhook_endpoint_repo,
+            webhook_event_repo,
+            default_renderers(),
+            master_secret=settings.secret_key,
+            delivery_timeout=wh.delivery_timeout_seconds,
+            max_payload_bytes=wh.max_payload_bytes,
+            max_consecutive_failures=wh.max_consecutive_failures,
+            poll_interval=wh.executor_poll_seconds,
+            lease_seconds=wh.executor_lease_seconds,
+        )
+        runtime.telemetry_tasks.append(
+            asyncio.create_task(executor.run(), name="webhook-delivery-executor")
+        )
+        log.info("webhooks_worker_registered", stream=DOMAIN_EVENTS_STREAM)
+
     if "stats" in groups:
         geoip = GeoIPService(settings.geoip_country_db, settings.geoip_city_db)
         url_cache = UrlCache(cache_redis, ttl_seconds=settings.redis.redis_ttl_seconds)
@@ -152,6 +217,7 @@ async def _build_runtime(
                 EmojiUrlRepository(db["emojis"]),
                 geoip,
                 url_cache,
+                events=worker_domain_sink,
             )
         )
 
@@ -253,16 +319,21 @@ async def _build_runtime(
     )
     if telemetry_redis is not None:
         runtime.telemetry_redis = telemetry_redis
-        runtime.telemetry_tasks = [
-            asyncio.create_task(
-                StreamMetricsReporter(
-                    telemetry_redis, ce.stream, ce.stats_interval_seconds
-                ).run_forever()
-            ),
-            asyncio.create_task(
-                StaleConsumerJanitor(telemetry_redis, ce.stream).run_forever()
-            ),
-        ]
+        # extend, never assign — the webhooks executor task is already in
+        # this list and an assignment would orphan it (uncancellable at
+        # shutdown).
+        runtime.telemetry_tasks.extend(
+            [
+                asyncio.create_task(
+                    StreamMetricsReporter(
+                        telemetry_redis, ce.stream, ce.stats_interval_seconds
+                    ).run_forever()
+                ),
+                asyncio.create_task(
+                    StaleConsumerJanitor(telemetry_redis, ce.stream).run_forever()
+                ),
+            ]
+        )
 
     return runtime
 
@@ -360,6 +431,56 @@ def _register_meta_image(
     )(claimer)
 
 
+def _register_domain_webhooks(
+    broker: RedisBroker,
+    ce: ClickEventsSettings,
+    consumer_suffix: str,
+    domain_consumer_for: Any,
+) -> None:
+    """Reader + claimer pair for the ``webhooks`` group on events:domain.
+
+    Reuses the click pipeline's batch/claim tunables — domain events are a
+    tiny fraction of click volume, so dedicated knobs would be dead config.
+    """
+    guard = ClaimDeadLetterGuard(
+        stream=DOMAIN_EVENTS_STREAM,
+        group="webhooks",
+        dlq_stream=f"{DOMAIN_EVENTS_STREAM}:dlq",
+        max_deliveries=ce.max_deliveries,
+    )
+
+    async def reader(body: Any) -> None:
+        await domain_consumer_for().consume(body)
+
+    reader.__name__ = "webhooks_domain_reader"
+    broker.subscriber(
+        stream=StreamSub(
+            DOMAIN_EVENTS_STREAM,
+            group="webhooks",
+            consumer=f"webhooks-{consumer_suffix}",
+            max_records=ce.batch_size,
+            polling_interval=ce.block_ms,
+        )
+    )(reader)
+
+    async def claimer(body: Any, msg: RedisMessage, redis: Redis) -> None:
+        message_id = _first_message_id(msg)
+        if message_id and await guard.intercept(redis, message_id, body):
+            return
+        await domain_consumer_for().consume(body)
+
+    claimer.__name__ = "webhooks_domain_claimer"
+    broker.subscriber(
+        stream=StreamSub(
+            DOMAIN_EVENTS_STREAM,
+            group="webhooks",
+            consumer=f"webhooks-{consumer_suffix}-claim",
+            min_idle_time=ce.claim_idle_ms,
+            polling_interval=ce.block_ms,
+        )
+    )(claimer)
+
+
 def _first_message_id(msg: Any) -> str | None:
     ids = (getattr(msg, "raw_message", None) or {}).get("message_ids") or []
     if not ids:
@@ -375,14 +496,18 @@ def create_worker_app(settings: AppSettings | None = None) -> AsgiFastStream:
     ce = settings.click_events
 
     mt = settings.meta_tags
+    wh = settings.webhooks
     run_clicks = ce.sink == "stream" and bool(ce.queue_redis_uri)
     run_meta = mt.async_image_validation and bool(ce.queue_redis_uri)
-    if not run_clicks and not run_meta:
+    run_webhooks = (
+        wh.enabled and wh.runtime in ("auto", "worker") and bool(ce.queue_redis_uri)
+    )
+    if not run_clicks and not run_meta and not run_webhooks:
         raise RuntimeError(
-            "The worker requires CLICK_EVENTS_QUEUE_REDIS_URI plus either "
-            "CLICK_EVENTS_SINK=stream or META_TAGS_ASYNC_IMAGE_VALIDATION. "
-            "Refusing to start so a misconfigured deployment fails loudly "
-            "instead of idling."
+            "The worker requires CLICK_EVENTS_QUEUE_REDIS_URI plus at least "
+            "one of CLICK_EVENTS_SINK=stream, META_TAGS_ASYNC_IMAGE_VALIDATION, "
+            "or WEBHOOKS_ENABLED. Refusing to start so a misconfigured "
+            "deployment fails loudly instead of idling."
         )
 
     groups = enabled_groups(ce) if run_clicks else []
@@ -407,20 +532,34 @@ def create_worker_app(settings: AppSettings | None = None) -> AsgiFastStream:
             raise RuntimeError("worker runtime not initialised")
         return runtime.meta_validator
 
+    def domain_consumer_for() -> WebhookDomainConsumer:
+        runtime = runtime_holder.get("runtime")
+        if (
+            runtime is None or runtime.webhook_domain_consumer is None
+        ):  # pragma: no cover
+            raise RuntimeError("worker runtime not initialised")
+        return runtime.webhook_domain_consumer
+
     consumer_suffix = f"{socket.gethostname()}-{os.getpid()}"
     for group in groups:
         _register_group(broker, ce, group, consumer_suffix, consumer_for)
     if run_meta:
         _register_meta_image(broker, mt, consumer_suffix, validator_for)
+    if run_webhooks:
+        # link.clicked feed: the `webhooks` group is a sibling of stats/
+        # hotness on the click stream (only when clicks ride the stream).
+        if run_clicks:
+            _register_group(broker, ce, "webhooks", consumer_suffix, consumer_for)
+        _register_domain_webhooks(broker, ce, consumer_suffix, domain_consumer_for)
 
     async def _startup() -> None:
         runtime_holder["runtime"] = await _build_runtime(
-            settings, groups, run_meta=run_meta
+            settings, groups, run_meta=run_meta, run_webhooks=run_webhooks
         )
         log.info(
             "click_worker_started",
             stream=ce.stream,
-            groups=groups,
+            groups=groups + (["webhooks"] if run_webhooks else []),
             claim_idle_ms=ce.claim_idle_ms,
             max_deliveries=ce.max_deliveries,
         )

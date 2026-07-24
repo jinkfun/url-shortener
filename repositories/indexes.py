@@ -14,7 +14,9 @@ from infrastructure.logging import get_logger
 log = get_logger(__name__)
 
 
-async def ensure_indexes(db: AsyncDatabase) -> None:
+async def ensure_indexes(
+    db: AsyncDatabase, *, webhook_log_ttl_seconds: int = 2_592_000
+) -> None:
     users_col = db["users"]
     urls_v2_col = db["urlsV2"]
     clicks_col = db["clicks"]
@@ -143,4 +145,59 @@ async def ensure_indexes(db: AsyncDatabase) -> None:
     await custom_domains_col.create_index([("owner_id", 1), ("created_at", -1)])
     await custom_domains_col.create_index([("status", 1), ("last_verified_at", 1)])
 
+    # ── webhooks ───────────────────────────────────────────────────────
+    # webhook-events: the fact stored once (deliveries reference it).
+    # Both TTLs ride the same value so a delivery can never outlive its
+    # event — changing WEBHOOKS_DELIVERY_LOG_TTL_DAYS requires
+    # the drop-recreate below because Mongo rejects expireAfterSeconds
+    # changes on an existing TTL index.
+    webhook_events_col = db["webhook-events"]
+    await webhook_events_col.create_index([("event_id", 1)], unique=True)
+    await webhook_events_col.create_index([("owner_id", 1), ("created_at", -1)])
+    await _ensure_ttl_index(webhook_events_col, webhook_log_ttl_seconds)
+
+    webhook_endpoints_col = db["webhook-endpoints"]
+    await webhook_endpoints_col.create_index([("user_id", 1), ("status", 1)])
+    await webhook_endpoints_col.create_index(
+        [("user_id", 1), ("events", 1), ("status", 1)], name="ix_matcher"
+    )
+
+    webhook_deliveries_col = db["webhook-deliveries"]
+    # THE claim index — the executor's whole query shape.
+    await webhook_deliveries_col.create_index(
+        [("status", 1), ("next_attempt_at", 1)], name="ix_claim"
+    )
+    await webhook_deliveries_col.create_index([("endpoint_id", 1), ("created_at", -1)])
+    await webhook_deliveries_col.create_index([("endpoint_id", 1), ("status", 1)])
+    await webhook_deliveries_col.create_index([("user_id", 1), ("created_at", -1)])
+    await webhook_deliveries_col.create_index([("webhook_id", 1)], unique=True)
+    await _ensure_ttl_index(webhook_deliveries_col, webhook_log_ttl_seconds)
+
     log.info("mongodb_indexes_ensured")
+
+
+async def _ensure_ttl_index(col, expire_after_seconds: int) -> None:
+    """Create the created_at TTL index, recreating it when the configured
+    TTL changed (Mongo rejects expireAfterSeconds edits in create_index)."""
+    try:
+        await col.create_index(
+            [("created_at", 1)],
+            expireAfterSeconds=expire_after_seconds,
+            name="ttl_created_at",
+        )
+    except OperationFailure as e:
+        if getattr(e, "code", None) != 85:  # IndexOptionsConflict
+            raise
+        try:
+            await col.drop_index("ttl_created_at")
+        except OperationFailure as drop_err:
+            # Code 27 = IndexNotFound: a racing instance (rolling deploy)
+            # already dropped it — recreating below is still correct.
+            if getattr(drop_err, "code", None) != 27:
+                raise
+        await col.create_index(
+            [("created_at", 1)],
+            expireAfterSeconds=expire_after_seconds,
+            name="ttl_created_at",
+        )
+        log.info("webhook_ttl_index_recreated", collection=col.name)

@@ -59,10 +59,19 @@ class FetchedBody:
     final_url: str
 
 
+_NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+
+
 def _is_public(ip: str) -> bool:
     addr = ipaddress.ip_address(ip)
-    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
-        addr = addr.ipv4_mapped
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped:
+            addr = addr.ipv4_mapped
+        # NAT64 (RFC 6052) reports is_global=True, but on a NAT64/DNS64
+        # host 64:ff9b::7f00:1 reaches 127.0.0.1 — reject the whole
+        # prefix; a translation address is never a legitimate target.
+        elif addr in _NAT64_PREFIX:
+            return False
     # is_global (not a flag union) catches CGNAT 100.64.0.0/10 and
     # transitional ranges the union missed; exclude multicast, which is
     # is_global=True but must never be a fetch target.
@@ -228,3 +237,95 @@ async def fetch_public_image(
         max_redirects=max_redirects,
         user_agent=user_agent,
     )
+
+
+@dataclass(frozen=True)
+class PostResult:
+    """Outcome of a webhook-style POST. Status outcomes are DATA here
+    (the delivery executor owns retry policy) — only SSRF violations and
+    transport errors surface as fields, never exceptions."""
+
+    status_code: int | None
+    error: str | None
+    body_snippet: str | None  # first 256 bytes, for the delivery log
+    # Parsed integer Retry-After, when the receiver sent one (429/503 flow
+    # control). HTTP-date form is not parsed — callers fall back to their
+    # own delay.
+    retry_after_seconds: float | None = None
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        seconds = float(value.strip())
+    except ValueError:
+        return None
+    return seconds if seconds >= 0 else None
+
+
+async def post_public(
+    url: str,
+    body: str,
+    *,
+    headers: dict[str, str],
+    timeout: float = 15.0,
+    snippet_bytes: int = 256,
+) -> PostResult:
+    """POST *body* to *url* with the same SSRF guards as fetch_public.
+
+    No redirects are followed — a redirect defeats IP pinning, so it is
+    reported as an error outcome. Never raises: webhook delivery failure
+    is a recorded fact, not an exception path.
+    """
+    try:
+        parsed = httpx.URL(url)
+        if parsed.scheme != "https":
+            return PostResult(None, "non-https URL", None)
+        ip = await _resolve_public_ip(parsed.host)
+    except (FetchHardError, FetchTransientError, httpx.InvalidURL) as exc:
+        # Transient DNS failures included: delivery outcomes are DATA for
+        # the retry ladder, never exceptions that skip attempt recording.
+        return PostResult(None, str(exc), None)
+
+    pinned = parsed.copy_with(host=_bracket(ip))
+    try:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
+            request = client.build_request(
+                "POST",
+                pinned,
+                content=body.encode(),
+                headers={"Host": parsed.host, **headers},
+                extensions={"sni_hostname": parsed.host},
+            )
+            resp = await client.send(request, stream=True)
+            try:
+                if resp.status_code in _REDIRECT_STATUSES:
+                    return PostResult(resp.status_code, "redirect not followed", None)
+                try:
+                    buf = await asyncio.wait_for(
+                        _read_body(resp, snippet_bytes, True), timeout=timeout
+                    )
+                except (asyncio.TimeoutError, TimeoutError):
+                    buf = bytearray()
+                snippet = bytes(buf).decode("utf-8", errors="replace") if buf else None
+                return PostResult(
+                    resp.status_code,
+                    None,
+                    snippet,
+                    _parse_retry_after(resp.headers.get("retry-after")),
+                )
+            finally:
+                await resp.aclose()
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
+        return PostResult(None, f"{type(exc).__name__}: {exc}", None)
+
+
+async def validate_public_https_url(url: str) -> None:
+    """Creation-time gate for user-registered outbound URLs (webhook
+    endpoints): https + all resolved addresses public. Raises
+    FetchHardError with a user-safe message otherwise."""
+    parsed = httpx.URL(url)
+    if parsed.scheme != "https":
+        raise FetchHardError("URL must be https")
+    await _resolve_public_ip(parsed.host)

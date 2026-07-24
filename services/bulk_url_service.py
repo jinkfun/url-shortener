@@ -43,12 +43,16 @@ from schemas.dto.responses.bulk import (
 from schemas.models.url import UrlStatus, UrlV2Doc
 from services.edge_cache.contract import cache_key
 from services.edge_cache.og_writethrough import build_og_entry
+from services.events.contract import DomainEvent
+from services.events.sinks import NullDomainEventSink
+from services.webhooks.payloads import event_changes, link_owner_id, link_snapshot
 from shared.reserved_aliases import is_reserved_alias
 
 if TYPE_CHECKING:
     from infrastructure.cache.url_cache import UrlCache
     from infrastructure.cloudflare_kv import CloudflareKVClient
     from repositories.url_repository import UrlRepository
+    from services.events.protocol import DomainEventSink
     from services.url_service import UrlService
 
 log = get_logger(__name__)
@@ -129,6 +133,7 @@ class BulkUrlService:
         kv: CloudflareKVClient | None,
         system_default_domain: str,
         og_ttl_seconds: int = 86_400,
+        events: DomainEventSink | None = None,
     ) -> None:
         self._url_repo = url_repo
         self._url_cache = url_cache
@@ -139,6 +144,10 @@ class BulkUrlService:
         self._kv = kv
         self._system_default_domain = system_default_domain
         self._og_ttl_seconds = og_ttl_seconds
+        # Domain-event sink (webhooks backbone). Per-item emission: a bulk
+        # op is N facts, and subscribers must not be able to tell bulk
+        # from a loop — same contract _log_updated already keeps for logs.
+        self._events = events or NullDomainEventSink()
         self._inflight: set[asyncio.Task] = set()
 
     # ── shared stages ────────────────────────────────────────────────────
@@ -288,6 +297,7 @@ class BulkUrlService:
             batch.ok(doc.id, alias=doc.alias)
         await self._invalidate((doc.alias, doc.domain) for doc in docs)
         self._edge_flush(purge_keys=self._system_domain_keys(docs))
+        await self._emit_deleted(docs)
         for doc in docs:
             log.info(
                 "url_deleted",
@@ -360,6 +370,7 @@ class BulkUrlService:
             # branch); plain links just re-promote when hot again.
             self._edge_flush(put_entries=self._og_put_entries(changed, status=status))
         self._log_updated(changed, set_ops, owner_id)
+        await self._emit_updated(changed, set_ops)
         return batch.report(op="set_status", user_id=owner_id)
 
     async def bulk_set_expiry(
@@ -432,8 +443,10 @@ class BulkUrlService:
         )
         if plain:
             self._log_updated(plain, plain_ops, owner_id)
+            await self._emit_updated(plain, plain_ops)
         if reactivate:
             self._log_updated(reactivate, react_ops, owner_id)
+            await self._emit_updated(reactivate, react_ops)
         return batch.report(op="set_expiry", user_id=owner_id)
 
     async def bulk_move_domain(
@@ -549,6 +562,7 @@ class BulkUrlService:
                 put_entries=self._og_put_entries(moved, domain=target),
             )
             self._log_updated(moved, set_ops, owner_id)
+            await self._emit_updated(moved, set_ops)
             for doc in moved:
                 log.info(
                     "url_domain_moved",
@@ -603,6 +617,41 @@ class BulkUrlService:
         for doc in docs:
             batch.ok(doc.id, alias=doc.alias)
         return True
+
+    async def _emit_updated(self, docs: list[UrlV2Doc], set_ops: dict) -> None:
+        """One link.updated per changed item — post-state snapshot plus the
+        same changes map the single-item producer builds."""
+        for doc in docs:
+            owner = link_owner_id(doc)
+            if owner is None:
+                continue
+            merged = doc.model_dump(by_alias=True)
+            merged.update(set_ops)
+            merged["_id"] = doc.id
+            post_doc = UrlV2Doc.from_mongo(merged)
+            await self._events.emit(
+                DomainEvent(
+                    type="link.updated",
+                    owner_id=owner,
+                    data={
+                        "link": link_snapshot(post_doc),
+                        "changes": event_changes(doc, set_ops),
+                    },
+                )
+            )
+
+    async def _emit_deleted(self, docs: list[UrlV2Doc]) -> None:
+        for doc in docs:
+            owner = link_owner_id(doc)
+            if owner is None:
+                continue
+            await self._events.emit(
+                DomainEvent(
+                    type="link.deleted",
+                    owner_id=owner,
+                    data={"link": link_snapshot(doc)},
+                )
+            )
 
     def _log_updated(
         self, docs: list[UrlV2Doc], set_ops: dict, owner_id: ObjectId
