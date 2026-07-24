@@ -259,3 +259,51 @@ class TestAllEventsBothFlavors:
                 parsed = json.loads(body)
                 assert parsed  # non-empty, valid JSON
                 assert len(body.encode()) < 20_480
+
+
+class TestDiscordInjection:
+    """Visitor-controlled payload values must never render as live
+    Discord markdown in the subscriber's channel."""
+
+    def _body_text(self, doc):
+        return "\n".join(
+            c["content"] for c in doc["components"][0]["components"] if c["type"] == 10
+        )
+
+    def test_masked_link_in_referrer_is_neutralized(self):
+        doc = _discord(
+            "link.clicked", _clicked_payload(referrer="[x](https://evil.phish)")
+        )
+        text = self._body_text(doc)
+        assert "[x](https://evil.phish)" not in text
+        assert "\\[x\\]" in text
+
+    def test_markdown_in_dimensions_is_neutralized(self):
+        doc = _discord(
+            "link.clicked",
+            _clicked_payload(browser="**bold**", city="`code`", os="||spoiler||"),
+        )
+        text = self._body_text(doc)
+        assert "**bold**" not in text
+        assert "`code`" not in text
+        assert "||spoiler||" not in text
+
+    def test_lifecycle_values_are_neutralized(self):
+        payload = {
+            "link": {
+                "alias": "a",
+                "domain": "spoo.me",
+                "long_url": "https://example.com/a(b)[c]",
+                "short_url": "https://spoo.me/a",
+            }
+        }
+        doc = _discord("link.created", payload)
+        text = self._body_text(doc)
+        assert "(b)[c]" not in text  # subtitle rides escaped
+
+    def test_link_target_parens_cannot_close_the_masked_link(self):
+        payload = _clicked_payload()
+        payload["short_url"] = "https://spoo.me/a)b"
+        doc = _discord("link.clicked", payload)
+        heading = doc["components"][0]["components"][0]["content"]
+        assert "](https://spoo.me/a%29b)" in heading

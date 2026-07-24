@@ -14,6 +14,7 @@ flavored endpoint.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -244,54 +245,66 @@ def _lifecycle_pairs(
     return pairs
 
 
-def clicked_summary(payload: dict[str, Any]) -> tuple[list[str], str | None]:
+def clicked_summary(
+    payload: dict[str, Any], escape: Callable[[str], str] | None = None
+) -> tuple[list[str], str | None]:
     """Grouped one-per-topic lines for vertical layouts (Components V2),
-    plus the running count for the footer."""
+    plus the running count for the footer.
+
+    ``escape`` runs on every payload-derived value BEFORE this function
+    adds its own markup. These values are visitor-controlled (the
+    referrer above all): a flavor whose text renders markup must
+    neutralize them, or a crafted Referer header plants live markdown in
+    the subscriber's channel."""
+    esc = escape or (lambda s: s)
     lines: list[str] = []
     if _present(payload.get("country")):
-        line = _country_display_bold(payload["country"])
+        line = _country_display_bold(payload["country"], esc)
         if _present(payload.get("city")):
-            line += f"  {payload['city']}"
+            line += f"  {esc(str(payload['city']))}"
         lines.append(line)
     elif _present(payload.get("city")):
-        lines.append(str(payload["city"]))
+        lines.append(esc(str(payload["city"])))
 
     device_bits = [
-        str(payload[k]) for k in ("browser", "os") if _present(payload.get(k))
+        esc(str(payload[k])) for k in ("browser", "os") if _present(payload.get(k))
     ]
     device = " on ".join(device_bits)
     if _present(payload.get("device")):
-        device = f"{device}, {payload['device']}" if device else str(payload["device"])
+        part = esc(str(payload["device"]))
+        device = f"{device}, {part}" if device else part
     if device:
         lines.append(device)
 
     referrer = payload.get("referrer")
     source = (
-        f"from **{_referrer_host(referrer)}**" if _present(referrer) else "direct visit"
+        f"from **{esc(_referrer_host(referrer))}**"
+        if _present(referrer)
+        else "direct visit"
     )
     utm = payload.get("utm")
     if isinstance(utm, dict):
-        campaign = " / ".join(str(v) for v in utm.values() if _present(v))
+        campaign = " / ".join(esc(str(v)) for v in utm.values() if _present(v))
         if campaign:
             source += f"  ({campaign})"
     lines.append(source)
 
     if payload.get("is_bot"):
         bot = payload.get("bot_name")
-        lines.append(f"bot  **{bot}**" if _present(bot) else "bot traffic")
+        lines.append(f"bot  **{esc(str(bot))}**" if _present(bot) else "bot traffic")
 
     total = payload.get("total_clicks")
     count = f"{total:,}" if isinstance(total, int) else None
     return [clip(line, _VALUE_MAX) for line in lines], count
 
 
-def _country_display_bold(code: Any) -> str:
+def _country_display_bold(code: Any, esc: Callable[[str], str]) -> str:
     text = str(code)
     if len(text) == 2 and text.isascii() and text.isalpha():
         upper = text.upper()
         flag = "".join(chr(0x1F1E6 + ord(c) - 65) for c in upper)
         return f"{flag} **{upper}**"
-    return str(code)
+    return esc(str(code))
 
 
 def build_copy(event_type: str, timestamp: str, payload: dict[str, Any]) -> Copy:

@@ -54,6 +54,22 @@ def _sep(spacing: int = 1, divider: bool = False) -> dict[str, Any]:
     return {"type": 14, "spacing": spacing, "divider": divider}
 
 
+_MARKDOWN_CHARS = set("\\`*_~|>#[]()")
+
+
+def _md(text: str) -> str:
+    """Backslash-escape Discord markdown in user-derived text. Payload
+    values reach live text displays, and text displays render markup —
+    without this a crafted Referer header plants a clickable masked link
+    in the subscriber's channel."""
+    return "".join("\\" + ch if ch in _MARKDOWN_CHARS else ch for ch in text)
+
+
+def _link_target(url: str) -> str:
+    # Parentheses inside a masked-link target close the link early.
+    return url.replace("(", "%28").replace(")", "%29")
+
+
 def _fence(text: str) -> str:
     # A value containing ``` would break out of the block.
     return text.replace("```", "'''")
@@ -80,20 +96,25 @@ class DiscordRenderer:
         # Heading: linked short address, except a deleted link has no
         # living address to point at.
         if copy.display and copy.title_url and event_type != "link.deleted":
-            components.append(_td(f"### {label}  [{copy.display}]({copy.title_url})"))
+            components.append(
+                _td(
+                    f"### {_md(label)}  "
+                    f"[{_md(copy.display)}]({_link_target(copy.title_url)})"
+                )
+            )
         elif copy.display:
-            components.append(_td(f"### {label}  {copy.display}"))
+            components.append(_td(f"### {_md(label)}  {_md(copy.display)}"))
         else:
-            components.append(_td(f"### {label}"))
+            components.append(_td(f"### {_md(label)}"))
         if copy.subtitle:
-            components.append(_td(f"-# {clip(copy.subtitle, _SUBTITLE_MAX)}"))
+            components.append(_td(f"-# {_md(clip(copy.subtitle, _SUBTITLE_MAX))}"))
 
         lifecycle = event_type in ("link.created", "link.deleted", "link.expired")
         components.append(_sep(2 if lifecycle else 1, divider=True))
 
         count: str | None = None
         if event_type == "link.clicked":
-            lines, count = clicked_summary(payload)
+            lines, count = clicked_summary(payload, escape=_md)
             components.append(_td("\n".join(lines)))
         elif copy.changes:
             diff_lines: list[str] = []
@@ -105,7 +126,7 @@ class DiscordRenderer:
             components.append(
                 _td(
                     "\n".join(
-                        f"**{name}**  {value}"
+                        f"**{name}**  {_md(value)}"
                         for name, value in copy.pairs
                         if name != "Destination"  # the subtitle already says it
                     )
@@ -114,7 +135,7 @@ class DiscordRenderer:
         elif copy.code:
             components.append(_td("```json\n" + _fence(copy.code) + "\n```"))
         elif copy.lines:
-            components.append(_td("\n".join(copy.lines)))
+            components.append(_td("\n".join(_md(line) for line in copy.lines)))
 
         components.append(_sep(2))
         verb, style = _FOOTERS.get(event_type, ("received", "f"))

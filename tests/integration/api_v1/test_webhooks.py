@@ -36,7 +36,7 @@ from services.webhooks.renderers import default_renderers
 from services.webhooks.signing import verify
 from tests.conftest import build_test_app
 
-from .conftest import _make_user
+from .conftest import _make_api_key_doc, _make_user
 
 _URL = "/api/v1/webhooks"
 _MASTER = "test-master-secret"
@@ -569,3 +569,16 @@ def test_reveal_secret_unknown_endpoint_404():
     with _NO_SSRF, TestClient(app) as c:
         resp = c.get(f"{_URL}/{ObjectId()}/secret")
         assert resp.status_code == 404
+
+
+def test_reveal_secret_refuses_api_key_auth():
+    """Secret reveal is credential material: interactive sessions only,
+    like key creation."""
+    app, _, _, _ = _build()
+    with _NO_SSRF, TestClient(app) as c:
+        created = c.post(_URL, json=_create_body()).json()
+    key_user = _make_user(api_key_doc=_make_api_key_doc(scopes=["webhooks:manage"]))
+    app.dependency_overrides[get_current_user] = lambda: key_user
+    with TestClient(app) as c:
+        resp = c.get(f"{_URL}/{created['id']}/secret")
+        assert resp.status_code == 403

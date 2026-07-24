@@ -30,6 +30,7 @@ from dependencies.auth import (
     WEBHOOKS_MANAGE_SCOPES,
     WEBHOOKS_READ_SCOPES,
     CurrentUser,
+    JwtVerifiedUser,
     require_scopes_verified,
 )
 from errors import ValidationError
@@ -184,11 +185,14 @@ async def get_endpoint(
 async def reveal_secret(
     request: Request,
     endpoint_id: Annotated[str, Path()],
-    user: ManageUser,
+    user: JwtVerifiedUser,
     webhook_service: WebhookSvc,
 ) -> WebhookSecretResponse:
     """The full signing secret, for the endpoint owner. Secrets are stored
-    encrypted and readable on demand; treat the response like a password."""
+    encrypted and readable on demand; treat the response like a password.
+
+    **Authentication**: Interactive session only — API keys are refused,
+    like every operation that exposes or mints credential material."""
     secret = await webhook_service.reveal_secret(
         _oid(endpoint_id, "endpoint"), user.user_id
     )
