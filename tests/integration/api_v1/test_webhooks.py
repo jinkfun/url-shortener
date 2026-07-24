@@ -11,6 +11,7 @@ the exact bodies asserted in this file.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -502,3 +503,44 @@ def test_scoped_endpoint_roundtrips_link_ids():
     with _NO_SSRF, TestClient(app) as c:
         created = c.post(_URL, json=_create_body(scope_links=[link_id])).json()
     assert created["scope_links"] == [link_id]
+
+
+def test_send_test_renders_discord_flavor_and_signature_covers_it():
+    """A discord-flavor endpoint delivers an embed body, and the signature
+    verifies over that rendered body (the raw envelope never leaves)."""
+    app, _, _, _ = _build()
+    post = AsyncMock(return_value=PostResult(204, None, None))
+    with (
+        _NO_SSRF,
+        patch("services.webhooks.executor.post_public", post),
+        TestClient(app) as c,
+    ):
+        created = c.post(_URL, json=_create_body(flavor="discord")).json()
+        assert created["flavor"] == "discord"
+        secret = created["signing_secret"]
+
+        resp = c.post(
+            f"{_URL}/{created['id']}/test", json={"event_type": "link.clicked"}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "success"
+
+        _, body = post.await_args[0]
+        headers = post.await_args.kwargs["headers"]
+        sent = json.loads(body)
+        assert sent["username"] == "spoo.me"
+        assert sent["embeds"][0]["title"].startswith("Click")
+        assert verify(
+            headers["webhook-id"],
+            int(headers["webhook-timestamp"]),
+            body,
+            secret,
+            headers["webhook-signature"],
+        )
+
+
+def test_create_rejects_unknown_flavor_422():
+    app, _, _, _ = _build()
+    with _NO_SSRF, TestClient(app) as c:
+        resp = c.post(_URL, json=_create_body(flavor="teams"))
+        assert resp.status_code == 422

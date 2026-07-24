@@ -22,7 +22,8 @@ class WebhookFlavor(str, Enum):
     versioned contract; other flavors are lossy renderings of it."""
 
     RAW = "raw"
-    # Phase 2: DISCORD = "discord"; SLACK = "slack"
+    DISCORD = "discord"
+    SLACK = "slack"
 
 
 class EndpointDisabledReason(str, Enum):
