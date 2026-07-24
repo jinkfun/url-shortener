@@ -24,6 +24,8 @@ from schemas.models.webhook import (
     WebhookEventDoc,
 )
 from services.webhooks.executor import (
+    RATE_LIMIT_FALLBACK_SECONDS,
+    RATE_LIMIT_MAX_DEFER_SECONDS,
     RETRY_SCHEDULE_SECONDS,
     SECRET_ENC_DOMAIN,
     DeliveryExecutor,
@@ -306,3 +308,75 @@ class TestFailurePaths:
         ts = int(headers[HEADER_TIMESTAMP])
         assert verify("msg_test", ts, body, _SECRET, headers[HEADER_SIGNATURE])
         assert verify("msg_test", ts, body, old_secret, headers[HEADER_SIGNATURE])
+
+
+class TestRateLimit:
+    """429 is receiver flow control: defer without burning the ladder."""
+
+    def _post_429(self, retry_after: float | None):
+        return AsyncMock(return_value=PostResult(429, None, None, retry_after))
+
+    @pytest.mark.asyncio
+    async def test_429_defers_without_ladder_or_streak(self):
+        executor, deliveries, endpoints, _ = _make(_endpoint())
+        with patch("services.webhooks.executor.post_public", self._post_429(None)):
+            await executor.attempt(_delivery(attempt_count=1))
+        deliveries.defer.assert_awaited_once()
+        assert (
+            deliveries.defer.await_args.kwargs["delay_seconds"]
+            == RATE_LIMIT_FALLBACK_SECONDS
+        )
+        deliveries.record_attempt_and_reschedule.assert_not_awaited()
+        deliveries.record_attempt_and_finish.assert_not_awaited()
+        endpoints.record_exhausted.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_429_honors_retry_after(self):
+        executor, deliveries, _, _ = _make(_endpoint())
+        with patch("services.webhooks.executor.post_public", self._post_429(5.0)):
+            await executor.attempt(_delivery())
+        assert deliveries.defer.await_args.kwargs["delay_seconds"] == 5
+
+    @pytest.mark.asyncio
+    async def test_429_retry_after_is_capped(self):
+        executor, deliveries, _, _ = _make(_endpoint())
+        with patch("services.webhooks.executor.post_public", self._post_429(3600.0)):
+            await executor.attempt(_delivery())
+        assert (
+            deliveries.defer.await_args.kwargs["delay_seconds"]
+            == RATE_LIMIT_MAX_DEFER_SECONDS
+        )
+
+    @pytest.mark.asyncio
+    async def test_single_shot_429_is_terminal_not_deferred(self):
+        # A rate-limited test send must report its outcome synchronously,
+        # not silently park the row.
+        executor, deliveries, _, _ = _make(_endpoint())
+        with patch("services.webhooks.executor.post_public", self._post_429(5.0)):
+            await executor.attempt(_delivery(is_test=True, next_attempt_at=None))
+        deliveries.defer.assert_not_awaited()
+        assert (
+            deliveries.record_attempt_and_finish.await_args[0][2]
+            is DeliveryStatus.FAILED
+        )
+
+
+class TestDeliveryUrl:
+    @pytest.mark.asyncio
+    async def test_discord_flavor_appends_components_param(self):
+        endpoint = _endpoint(flavor=WebhookFlavor.DISCORD)
+        executor, _, _, _ = _make(endpoint)
+        post = _post(204)
+        with patch("services.webhooks.executor.post_public", post):
+            await executor.attempt(_delivery())
+        url = post.await_args[0][0]
+        assert url == f"{endpoint.url}?with_components=true"
+
+    @pytest.mark.asyncio
+    async def test_raw_flavor_url_is_untouched(self):
+        endpoint = _endpoint()
+        executor, _, _, _ = _make(endpoint)
+        post = _post(204)
+        with patch("services.webhooks.executor.post_public", post):
+            await executor.attempt(_delivery())
+        assert post.await_args[0][0] == endpoint.url

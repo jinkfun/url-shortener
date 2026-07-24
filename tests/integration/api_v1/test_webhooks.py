@@ -11,6 +11,7 @@ the exact bodies asserted in this file.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -35,7 +36,7 @@ from services.webhooks.renderers import default_renderers
 from services.webhooks.signing import verify
 from tests.conftest import build_test_app
 
-from .conftest import _make_user
+from .conftest import _make_api_key_doc, _make_user
 
 _URL = "/api/v1/webhooks"
 _MASTER = "test-master-secret"
@@ -106,7 +107,6 @@ class _FakeEndpointRepo:
             {
                 "consecutive_failures": 0,
                 "dropped_count": 0,
-                "total_deliveries": doc.total_deliveries + 1,
                 "total_successes": doc.total_successes + 1,
                 "last_delivery_at": datetime.now(timezone.utc),
                 "last_success_at": datetime.now(timezone.utc),
@@ -121,11 +121,16 @@ class _FakeEndpointRepo:
             endpoint_id,
             {
                 "consecutive_failures": streak,
-                "total_deliveries": doc.total_deliveries + 1,
                 "last_failure_reason": reason,
             },
         )
         return streak
+
+    async def increment_deliveries(self, endpoint_id, by=1):
+        doc = self.docs[endpoint_id]
+        await self.update_fields(
+            endpoint_id, {"total_deliveries": doc.total_deliveries + by}
+        )
 
     async def increment_dropped(self, endpoint_id):
         doc = self.docs[endpoint_id]
@@ -502,3 +507,78 @@ def test_scoped_endpoint_roundtrips_link_ids():
     with _NO_SSRF, TestClient(app) as c:
         created = c.post(_URL, json=_create_body(scope_links=[link_id])).json()
     assert created["scope_links"] == [link_id]
+
+
+def test_send_test_renders_discord_flavor_and_signature_covers_it():
+    """A discord-flavor endpoint delivers an embed body, and the signature
+    verifies over that rendered body (the raw envelope never leaves)."""
+    app, _, _, _ = _build()
+    post = AsyncMock(return_value=PostResult(204, None, None))
+    with (
+        _NO_SSRF,
+        patch("services.webhooks.executor.post_public", post),
+        TestClient(app) as c,
+    ):
+        created = c.post(_URL, json=_create_body(flavor="discord")).json()
+        assert created["flavor"] == "discord"
+        secret = created["signing_secret"]
+
+        resp = c.post(
+            f"{_URL}/{created['id']}/test", json={"event_type": "link.clicked"}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "success"
+
+        url, body = post.await_args[0]
+        headers = post.await_args.kwargs["headers"]
+        assert url.endswith("?with_components=true")
+        sent = json.loads(body)
+        assert sent["username"] == "spoo.me"
+        assert sent["flags"] == 32768
+        texts = [
+            c["content"] for c in sent["components"][0]["components"] if c["type"] == 10
+        ]
+        assert texts[0].startswith("### Click")
+        assert verify(
+            headers["webhook-id"],
+            int(headers["webhook-timestamp"]),
+            body,
+            secret,
+            headers["webhook-signature"],
+        )
+
+
+def test_create_rejects_unknown_flavor_422():
+    app, _, _, _ = _build()
+    with _NO_SSRF, TestClient(app) as c:
+        resp = c.post(_URL, json=_create_body(flavor="teams"))
+        assert resp.status_code == 422
+
+
+def test_reveal_secret_returns_the_created_secret():
+    app, _, _, _ = _build()
+    with _NO_SSRF, TestClient(app) as c:
+        created = c.post(_URL, json=_create_body()).json()
+        revealed = c.get(f"{_URL}/{created['id']}/secret")
+        assert revealed.status_code == 200
+        assert revealed.json()["signing_secret"] == created["signing_secret"]
+
+
+def test_reveal_secret_unknown_endpoint_404():
+    app, _, _, _ = _build()
+    with _NO_SSRF, TestClient(app) as c:
+        resp = c.get(f"{_URL}/{ObjectId()}/secret")
+        assert resp.status_code == 404
+
+
+def test_reveal_secret_refuses_api_key_auth():
+    """Secret reveal is credential material: interactive sessions only,
+    like key creation."""
+    app, _, _, _ = _build()
+    with _NO_SSRF, TestClient(app) as c:
+        created = c.post(_URL, json=_create_body()).json()
+    key_user = _make_user(api_key_doc=_make_api_key_doc(scopes=["webhooks:manage"]))
+    app.dependency_overrides[get_current_user] = lambda: key_user
+    with TestClient(app) as c:
+        resp = c.get(f"{_URL}/{created['id']}/secret")
+        assert resp.status_code == 403

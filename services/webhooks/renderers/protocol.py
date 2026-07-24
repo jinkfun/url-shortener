@@ -12,6 +12,10 @@ from typing import Any, Protocol
 
 
 class Renderer(Protocol):
+    # Optional: query params the executor appends to the endpoint URL at
+    # delivery time (e.g. Discord's ``with_components=true``). Absent or
+    # empty means the URL is used as stored.
+
     flavor: str
 
     def render(

@@ -14,6 +14,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 
 from infrastructure.crypto import decrypt_secret
 from infrastructure.logging import get_logger
@@ -43,6 +44,10 @@ USER_AGENT = "spoo.me-webhooks/1.0 (+https://spoo.me)"
 
 # Standard Webhooks retry convention: immediate, 5s, 5m, 30m, 2h, 5h, 10h.
 RETRY_SCHEDULE_SECONDS = (0, 5, 300, 1800, 7200, 18000, 36000)
+
+# 429 handling: honor Retry-After within a ceiling, else back off a minute.
+RATE_LIMIT_FALLBACK_SECONDS = 60
+RATE_LIMIT_MAX_DEFER_SECONDS = 900
 
 # Type of the on-disable hook — wiring plugs email notification in here so
 # the executor never grows an email dependency.
@@ -148,7 +153,7 @@ class DeliveryExecutor:
 
         started = time.monotonic()
         result = await post_public(
-            endpoint.url,
+            self._delivery_url(endpoint),
             body,
             headers=headers,
             timeout=self._timeout,
@@ -180,6 +185,29 @@ class DeliveryExecutor:
                 is_test=row.is_test,
             )
             return
+
+        if result.status_code == 429 and not single_shot:
+            # Rate limiting is receiver flow control, not endpoint failure —
+            # normal operation for Discord/Slack receivers. Hold the row
+            # without burning a ladder attempt or touching the streak; the
+            # delivery-log TTL is the backstop for a receiver that
+            # rate-limits forever, and the pending cap bounds the queue.
+            delay = int(
+                min(
+                    result.retry_after_seconds or RATE_LIMIT_FALLBACK_SECONDS,
+                    RATE_LIMIT_MAX_DEFER_SECONDS,
+                )
+            )
+            await self._deliveries.defer(row.id, delay_seconds=delay)
+            log.info(
+                "webhook_delivery_rate_limited",
+                endpoint_id=str(endpoint.id),
+                event_type=row.event_type,
+                webhook_id=row.webhook_id,
+                delay_seconds=delay,
+            )
+            return
+
         log.warning(
             "webhook_delivery_attempt_failed",
             endpoint_id=str(endpoint.id),
@@ -229,6 +257,17 @@ class DeliveryExecutor:
 
     # ── Internals ────────────────────────────────────────────────────────
 
+    def _delivery_url(self, endpoint: WebhookEndpointDoc) -> str:
+        """Endpoint URL plus any query params the flavor's renderer
+        declares (Discord's components-v2 bodies need
+        ``with_components=true``). The signature covers the body alone,
+        so delivery mechanics can ride the URL."""
+        renderer = self._renderers.get(endpoint.flavor.value)
+        query = getattr(renderer, "url_query", None)
+        if not query:
+            return endpoint.url
+        return endpoint.url + ("&" if "?" in endpoint.url else "?") + urlencode(query)
+
     async def _render(
         self, row: WebhookDeliveryDoc, endpoint: WebhookEndpointDoc
     ) -> str | None:
@@ -246,8 +285,14 @@ class DeliveryExecutor:
         payload = dict(event.payload)
         if row.dropped_since_last:
             payload["dropped_since_last"] = row.dropped_since_last
+        # Mongo returns naive datetimes; the wire timestamp must carry its
+        # UTC offset or consumers (and Discord's local-time rendering)
+        # can't place it.
         body = renderer.render(
-            event.event_id, event.type, event.occurred_at.isoformat(), payload
+            event.event_id,
+            event.type,
+            as_aware_utc(event.occurred_at).isoformat(),
+            payload,
         )
         if len(body.encode()) > self._max_bytes:
             await self._deliveries.mark_failed(row.id, "payload_over_cap")

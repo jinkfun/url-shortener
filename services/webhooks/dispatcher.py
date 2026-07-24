@@ -98,6 +98,8 @@ class WebhookDispatcher:
             rows.append(make_delivery_row(event_oid, event, endpoint))
 
         await self._delivery_repo.insert_many_rows(rows)
+        for row in rows:
+            await self._endpoint_repo.increment_deliveries(row["endpoint_id"])
         log.info(
             "webhook_dispatched",
             event_type=event.type,

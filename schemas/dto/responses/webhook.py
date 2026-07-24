@@ -80,6 +80,12 @@ class WebhookEndpointCreatedResponse(WebhookEndpointResponse):
     )
 
 
+class WebhookSecretResponse(ResponseBase):
+    signing_secret: str = Field(
+        description="The full signing secret, revealed to the endpoint owner."
+    )
+
+
 class WebhookEndpointsListResponse(ResponseBase):
     endpoints: list[WebhookEndpointResponse]
 
